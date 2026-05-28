@@ -34,7 +34,7 @@ class Net(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x, self.mask(x, 0))
-        x = x.view(x.size()[0], -1)
+        x = x.reshape(x.size()[0], -1)
         x = self.f1(self.l1(x))
         x = self.f2(self.l2(x))
         x = self.f3(self.l3(x))

@@ -42,7 +42,7 @@ class ActorCriticNet(nn.Module):
 
     def forward(self, x):
         enc    = self.encoder(x, (x != 0).unsqueeze(-2))
-        enc    = enc.view(enc.size(0), -1)
+        enc    = enc.reshape(enc.size(0), -1)
         logits = self.actor(enc)
         value  = self.critic(enc).squeeze(-1)
         return logits, value
