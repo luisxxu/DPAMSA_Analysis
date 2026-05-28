@@ -8,6 +8,7 @@ from env import Environment
 from dqn import DQN
 from actor_critic import ActorCritic
 from ppo import PPO
+from acer import ACER
 from parallel_env import ParallelEnvironment
 # The Biopython module is used to load in fasta file datasets
 from Bio import SeqIO
@@ -37,8 +38,8 @@ def main():
     parser.add_argument("--algorithm",
                         type=str,
                         default="dqn",
-                        choices=["dqn", "a2c", "ppo"],
-                        help="RL algorithm to use: dqn (default), a2c, or ppo")
+                        choices=["dqn", "a2c", "ppo", "acer"],
+                        help="RL algorithm to use: dqn (default), a2c, ppo, or acer")
     parser.add_argument("--scoring",
                         type=str,
                         default="sp",
@@ -77,6 +78,8 @@ def main():
             train_ppo_parallel(sequences, args.scoring)
         else:
             train_ppo(sequences, args.scoring)
+    elif args.algorithm == "acer":
+        train_acer(sequences, args.scoring)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +419,90 @@ def train_ppo(sequences, scoring="sp"):
             break
     predict_end_time = time.monotonic()
     print("Prediction Complete (PPO)")
+    print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
+
+    env.padding()
+    _print_results(env, scoring)
+    print("********************************\n")
+
+
+# ---------------------------------------------------------------------------
+# ACER training
+# ---------------------------------------------------------------------------
+
+def output_parameters_acer():
+    """Print ACER hyperparameters."""
+    print("Gap penalty: {}".format(config.GAP_PENALTY))
+    print("Mismatch penalty: {}".format(config.MISMATCH_PENALTY))
+    print("Match reward: {}".format(config.MATCH_REWARD))
+    print("Episode: {}".format(config.max_episode))
+    print("Gamma: {}".format(config.gamma))
+    print("ACER learning rate: {}".format(config.acer_lr))
+    print("ACER c_bar: {}".format(config.acer_c_bar))
+    print("ACER replay size: {}".format(config.acer_replay_size))
+    print("ACER replay ratio: {}".format(config.acer_replay_ratio))
+    print("ACER trust-region delta: {}".format(config.acer_trust_region_delta))
+    print("ACER EMA alpha: {}".format(config.acer_ema_alpha))
+    print("ACER value coef: {}".format(config.acer_value_coef))
+    print("ACER entropy coef: {}".format(config.acer_entropy_coef))
+    print("Device: {}".format(config.device_name))
+
+
+def train_acer(sequences, scoring="sp"):
+    """Train an ACER agent on the provided sequences.
+
+    Loop structure:
+        for each episode:
+            collect full episode → agent.select() + agent.record_transition()
+            on-policy update    → agent.update()
+                (also performs acer_replay_ratio off-policy updates from replay
+                 buffer and updates the EMA average policy)
+        run greedy inference    → agent.predict()
+
+    ACER improves on A2C by:
+      • Using Retrace(λ) Q-value estimates instead of Monte-Carlo returns,
+        reducing variance while correcting for off-policy bias.
+      • Replaying past episodes for better sample efficiency.
+      • Adding a trust-region penalty (KL from EMA average policy) to prevent
+        catastrophic policy updates.
+    """
+    output_parameters_acer()
+    train_start_time = time.monotonic()
+
+    print(f"Training on {len(sequences)} sequences (ACER):")
+    for key in sequences:
+        print(f"Sequence {key}")
+
+    env   = Environment(list(sequences.values()))
+    agent = ACER(env.action_number, env.row, env.max_len)
+    p     = tqdm(range(config.max_episode))
+
+    for _ in p:
+        state = env.reset()
+        while True:
+            action = agent.select(state)
+            reward, next_state, done = env.step(action)
+            agent.record_transition(reward, float(done))
+            if done == 0:
+                break
+            state = next_state
+        agent.update()
+
+    train_end_time = time.monotonic()
+    print("Training Complete (ACER)")
+    print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
+
+    # Greedy inference
+    predict_start_time = time.monotonic()
+    state = env.reset()
+    while True:
+        action = agent.predict(state)
+        _, next_state, done = env.step(action)
+        state = next_state
+        if 0 == done:
+            break
+    predict_end_time = time.monotonic()
+    print("Prediction Complete (ACER)")
     print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
 
     env.padding()
