@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# PyTorch / model weights
+*.pth
+*.ckpt
+
+# Results (generated at runtime)
+../result/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

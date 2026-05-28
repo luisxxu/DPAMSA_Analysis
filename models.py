@@ -1,4 +1,4 @@
-# This script was not editted from the original
+import math
 import torch
 import torch.nn as nn
 import numpy as np
@@ -6,6 +6,26 @@ import torch.nn.functional as F
 
 """
     Referenced from Github: https://github.com/huggingface/transformers
+
+    Improvement 7: Replaced the custom single-head SelfAttention with
+    nn.MultiheadAttention (n_heads=4). Multi-head attention allows the model
+    to simultaneously attend to alignment patterns at different positions and
+    representation subspaces, improving feature extraction quality without
+    increasing inference time significantly. With d_model=64 and n_heads=4,
+    each head operates on a 16-dimensional subspace.
+
+    Embedding improvement A: IUPAC ambiguous nucleotide token IDs
+    Vocabulary is expanded from 6 to 11 tokens. Ambiguous code embeddings
+    are initialised as the mean of their constituent canonical base embeddings
+    so the model starts from a biologically meaningful point rather than noise.
+
+    Embedding improvement B: Embedding scale (sqrt(d_model))
+    Following the original Transformer paper (Vaswani et al., 2017), token
+    embeddings are multiplied by sqrt(d_model) before positional encoding is
+    added. Without this, the positional signal — whose magnitude is fixed at
+    ~1 — dominates the token signal because randomly-initialised embedding
+    weights are typically small, causing the model to underweight token
+    identity relative to position.
 """
 
 
@@ -18,24 +38,6 @@ def get_subsequent_mask(seq):
     subsequent_mask = (1 - torch.triu(
         torch.ones((1, len_s, len_s), device=seq.device), diagonal=1)).bool()
     return subsequent_mask
-
-
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, temperature, attn_dropout=0.1):
-        super().__init__()
-        self.temperature = temperature
-        self.dropout = nn.Dropout(attn_dropout)
-
-    def forward(self, q, k, v, mask=None):
-        attn = torch.matmul(q / self.temperature, k.transpose(2, 3))
-
-        if mask is not None:
-            attn = attn.masked_fill(mask == 0, -1e9)
-
-        attn = self.dropout(F.softmax(attn, dim=-1))
-        output = torch.matmul(attn, v)
-
-        return output, attn
 
 
 class PositionalEncoding(nn.Module):
@@ -60,67 +62,76 @@ class PositionalEncoding(nn.Module):
         return x + y
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, d_model, d_k, d_v, dropout=0.1):
-        super().__init__()
-
-        self.d_k = d_k
-        self.d_v = d_v
-
-        self.w_qs = nn.Linear(d_model, d_k, bias=False)
-        self.w_ks = nn.Linear(d_model, d_k, bias=False)
-        self.w_vs = nn.Linear(d_model, d_v, bias=False)
-        self.fc = nn.Linear(d_v, d_model, bias=False)
-
-        self.attention = ScaledDotProductAttention(temperature=d_k ** 0.5)
-
-        self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
-
-    def forward(self, q, k, v, mask=None):
-        d_k, d_v = self.d_k, self.d_v
-        sz_b, len_q, len_k, len_v = q.size(0), q.size(1), k.size(1), v.size(1)
-
-        residual = q
-
-        q = self.w_qs(q).view(sz_b, len_q, 1, d_k)
-        k = self.w_ks(k).view(sz_b, len_k, 1, d_k)
-        v = self.w_vs(v).view(sz_b, len_v, 1, d_v)
-
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-
-        q, attn = self.attention(q, k, v, mask=mask)
-
-        q = q.transpose(1, 2).contiguous().view(sz_b, len_q, -1)
-        q = self.dropout(self.fc(q))
-        q += residual
-
-        q = self.layer_norm(q)
-
-        return q, attn
-
-
 class Encoder(nn.Module):
+    """Transformer encoder using multi-head self-attention.
+
+    Improvement 7: The original single-head SelfAttention is replaced with
+    nn.MultiheadAttention. This uses PyTorch's optimised (fused) attention
+    kernel and supports 4 attention heads, enabling the encoder to capture
+    richer alignment features in parallel.
+
+    Embedding improvement A: vocabulary expanded from 6 → 11 to give IUPAC
+    ambiguous codes (N, R, W, K, Y) their own IDs. Their embeddings are
+    initialised as the mean of constituent base embeddings.
+
+    Embedding improvement B: token embeddings are scaled by sqrt(d_model)
+    before positional encoding is added, following Vaswani et al. (2017).
+
+    d_k and d_v are retained in the signature for backward compatibility
+    but are no longer used; head_dim is derived as d_model // n_heads.
+    """
+
     def __init__(
-            self, n_src_vocab, d_model, n_position, d_k=164, d_v=164,
-            pad_idx=0, dropout=0.1):
+            self, n_src_vocab, d_model, n_position, n_heads=4,
+            d_k=164, d_v=164, pad_idx=0, dropout=0.1):
         super().__init__()
         self.pad_idx = pad_idx
+        # Embedding improvement B: precompute the scale factor
+        self.scale = math.sqrt(d_model)
+
         self.src_word_emb = nn.Embedding(n_src_vocab, d_model, padding_idx=pad_idx)
         self.position_enc = PositionalEncoding(d_model, n_position=n_position)
         self.dropout = nn.Dropout(p=dropout)
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
-        self.self_attention = SelfAttention(d_model, d_k, d_v, dropout=dropout)
+        # Improvement 7: multi-head attention — with d_model=64 and n_heads=4, head_dim=16
+        self.attn = nn.MultiheadAttention(
+            d_model, num_heads=n_heads, dropout=dropout, batch_first=True)
 
-    def forward(self, src_seq, mask):
-        # -- Forward
-        enc_output = self.src_word_emb(src_seq)
+        # Embedding improvement A: seed ambiguous-code rows with constituent means
+        self._init_iupac_embeddings()
+
+    def _init_iupac_embeddings(self):
+        """Set ambiguous IUPAC embedding rows to the mean of their constituent bases.
+
+        Token IDs: pad=0, A=1, T=2, C=3, G=4, gap=5, N=6, R=7, W=8, K=9, Y=10
+
+        IUPAC definitions used:
+            N (6) — any nucleotide: A, T, C, G
+            R (7) — purine:         A, G
+            W (8) — weak bond:      A, T
+            K (9) — keto:           G, T
+            Y (10) — pyrimidine:    C, T
+        """
+        with torch.no_grad():
+            w = self.src_word_emb.weight  # (vocab_size, d_model)
+            w[6] = (w[1] + w[2] + w[3] + w[4]) / 4  # N = mean(A, T, C, G)
+            w[7] = (w[1] + w[4]) / 2                  # R = mean(A, G)
+            w[8] = (w[1] + w[2]) / 2                  # W = mean(A, T)
+            w[9] = (w[4] + w[2]) / 2                  # K = mean(G, T)
+            w[10] = (w[3] + w[2]) / 2                 # Y = mean(C, T)
+
+    def forward(self, src_seq, mask=None):
+        # Embedding improvement B: scale by sqrt(d_model) so token signal is
+        # not drowned out by the fixed-magnitude positional encoding
+        enc_output = self.src_word_emb(src_seq) * self.scale
         enc_output = self.position_enc(enc_output)
         enc_output = self.dropout(enc_output)
         enc_output = self.layer_norm(enc_output)
-        enc_output, enc_slf_attn = self.self_attention(enc_output, enc_output, enc_output, mask=mask)
+
+        # Build padding mask: True for pad positions (to be ignored by attention)
+        key_padding_mask = (src_seq == self.pad_idx)
+        enc_output, _ = self.attn(
+            enc_output, enc_output, enc_output,
+            key_padding_mask=key_padding_mask)
 
         return enc_output

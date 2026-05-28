@@ -1,4 +1,3 @@
-# This script was not editted from the original
 from abc import ABC
 import torch
 import torch.nn as nn
@@ -8,16 +7,21 @@ import random
 import os
 from models import Encoder
 from replay_memory import ReplayMemory
+# VOCAB_SIZE is defined alongside nucleotides_map in env.py so that the
+# vocabulary size stays in sync automatically whenever new token IDs are added.
+from env import VOCAB_SIZE
 
 
 class Net(nn.Module):
-    """docstring for Net"""
+    """DQN network: Transformer encoder followed by three fully-connected layers."""
 
     def __init__(self, seq_num, max_seq_len, action_number, max_value, d_model=64):
         super(Net, self).__init__()
         self.max_value = max_value
         dim = seq_num * (max_seq_len + 1)
-        self.encoder = Encoder(6, d_model, dim)
+        # Embedding improvement A/B: VOCAB_SIZE (imported from env.py) replaces
+        # the hardcoded 6 so the encoder automatically tracks any vocabulary changes.
+        self.encoder = Encoder(VOCAB_SIZE, d_model, dim)
         self.dropout = nn.Dropout()
         self.l1 = nn.Linear(dim * d_model, 1028)
         self.f1 = nn.LeakyReLU()
@@ -30,13 +34,11 @@ class Net(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x, self.mask(x, 0))
-        # x = self.dropout(x)
         x = x.view(x.size()[0], -1)
         x = self.f1(self.l1(x))
         x = self.f2(self.l2(x))
         x = self.f3(self.l3(x))
         x = torch.mul(x, self.max_value)
-
         return x
 
 
@@ -49,6 +51,16 @@ class DQN(ABC):
         self.eval_net = Net(seq_num, max_seq_len, action_number, max_value).to(config.device)
         self.target_net = Net(seq_num, max_seq_len, action_number, max_value).to(config.device)
 
+        # Improvement 8: torch.compile() (PyTorch >= 2.0) JIT-compiles the model
+        # graph, fusing operations and eliminating Python overhead for 10-30%
+        # additional speedup at zero algorithmic cost. Falls back silently on
+        # older PyTorch versions.
+        try:
+            self.eval_net = torch.compile(self.eval_net)
+            self.target_net = torch.compile(self.target_net)
+        except Exception:
+            pass  # torch.compile not available (PyTorch < 2.0)
+
         self.current_epsilon = config.epsilon
 
         self.update_step_counter = 0
@@ -56,7 +68,17 @@ class DQN(ABC):
 
         self.replay_memory = ReplayMemory()
         self.optimizer = torch.optim.Adam(self.eval_net.parameters(), lr=config.alpha)
-        self.loss_func = nn.MSELoss()
+
+        # Improvement 2: Huber loss (SmoothL1) instead of MSE.
+        # MSE heavily penalises large TD errors, causing unstable gradient spikes.
+        # Huber loss is quadratic for small errors and linear for large ones,
+        # giving stable gradients throughout training.
+        self.loss_func = nn.SmoothL1Loss()
+
+        # Improvement 3: Mixed-precision scaler for torch.cuda.amp.
+        # enabled=False is a no-op on CPU so this is safe in all environments.
+        self._use_amp = torch.cuda.is_available()
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self._use_amp)
 
     def update_epsilon(self):
         self.epsilon_step_counter += 1
@@ -69,17 +91,18 @@ class DQN(ABC):
             action = np.random.randint(0, self.action_number)
         # greedy policy
         else:
-            action_val = self.eval_net.forward(torch.LongTensor(state).unsqueeze_(0).to(config.device))
+            action_val = self.eval_net.forward(
+                torch.LongTensor(state).unsqueeze(0).to(config.device))
             action = torch.argmax(action_val, 1).cpu().data.numpy()[0]
-
         return action
 
     def predict(self, state):
-        action_val = self.eval_net.forward(torch.LongTensor(state).unsqueeze_(0).to(config.device))
+        action_val = self.eval_net.forward(
+            torch.LongTensor(state).unsqueeze(0).to(config.device))
         return torch.argmax(action_val, 1).cpu().data.numpy()[0]
 
     def update(self):
-        # updating the parameters
+        # Sync target network periodically
         self.update_step_counter += 1
         if self.update_step_counter % config.update_iteration == 0:
             self.target_net.load_state_dict(self.eval_net.state_dict())
@@ -87,26 +110,56 @@ class DQN(ABC):
         if self.replay_memory.size < config.batch_size:
             return
 
-        # sampling batch from memory
-        state, next_state, action, reward, done = self.replay_memory.sample(config.batch_size)
+        # Improvement 6: sample returns indices so priorities can be updated
+        state, next_state, action, reward, done, indices = \
+            self.replay_memory.sample(config.batch_size)
 
-        batch_state = torch.LongTensor(state).to(config.device)
+        batch_state      = torch.LongTensor(state).to(config.device)
         batch_next_state = torch.LongTensor(next_state).to(config.device)
-        batch_action = torch.LongTensor(action).to(config.device)
-        batch_reward = torch.FloatTensor(reward).to(config.device)
-        batch_done = torch.FloatTensor(done).to(config.device)
+        batch_action     = torch.LongTensor(action).to(config.device)
+        batch_reward     = torch.FloatTensor(reward).to(config.device)
+        batch_done       = torch.FloatTensor(done).to(config.device)
 
-        # q_eval
-        q_eval = self.eval_net(batch_state).gather(1, batch_action.unsqueeze_(-1)).squeeze_(1).to(config.device)
+        # Improvement 3: Mixed-precision forward passes — ~2x faster on GPU.
+        # autocast is a no-op when enabled=False (CPU), so this is always safe.
+        with torch.cuda.amp.autocast(enabled=self._use_amp):
+            # q_eval: Q-value of the action actually taken
+            q_eval = self.eval_net(batch_state).gather(
+                1, batch_action.unsqueeze(1)).squeeze(1)
 
-        # q_target
-        q_next = self.target_net(batch_next_state).max(1)[0].to(config.device).detach_()
-        q_target = batch_reward + batch_done * config.gamma * q_next
+            # Improvement 5: Double DQN target computation.
+            # Vanilla DQN uses the target_net for both action selection and
+            # evaluation, causing systematic overestimation of Q-values.
+            # Double DQN uses eval_net to SELECT the best next action and
+            # target_net to EVALUATE it, decoupling the two and removing the
+            # maximisation bias.
+            with torch.no_grad():
+                best_next_actions = self.eval_net(batch_next_state).argmax(
+                    1, keepdim=True)
+                q_next = self.target_net(batch_next_state).gather(
+                    1, best_next_actions).squeeze(1).detach()
 
-        loss = self.loss_func(q_eval, q_target)
+            # config.gamma = 0.99 (was 1): discounting stabilises training
+            q_target = batch_reward + batch_done * config.gamma * q_next
+
+            # Improvement 2: SmoothL1Loss (Huber)
+            loss = self.loss_func(q_eval, q_target)
+
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        self.scaler.scale(loss).backward()
+
+        # Improvement 2: Gradient clipping — unscale first so the clip
+        # threshold is in the original gradient units, not scaled units.
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.eval_net.parameters(), max_norm=10.0)
+
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+
+        # Improvement 6: update replay priorities with absolute TD errors
+        with torch.no_grad():
+            td_errors = (q_eval.detach().float() - q_target.float()).abs().cpu().numpy()
+        self.replay_memory.update_priorities(indices, td_errors)
 
     def save(self, filename, path=config.weight_path):
         torch.save(self.eval_net.state_dict(), os.path.join(path, "{}.pth".format(filename)))
