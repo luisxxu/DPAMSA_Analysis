@@ -40,6 +40,10 @@ def main():
                         default="dqn",
                         choices=["dqn", "a2c", "ppo", "acer"],
                         help="RL algorithm to use: dqn (default), a2c, ppo, or acer")
+    parser.add_argument("--episodes",
+                        type=int,
+                        default=None,
+                        help="Number of training episodes (overrides config.max_episode)")
     parser.add_argument("--scoring",
                         type=str,
                         default="sp",
@@ -54,6 +58,9 @@ def main():
     # This line ensures that a GPU node is being used if available
     config.device_name = "cuda:0" if torch.cuda.is_available() else "cpu"
     config.device = torch.device(config.device_name)
+
+    if args.episodes is not None:
+        config.max_episode = args.episodes
 
     # Load sequences from the fasta file using the BioPython tools
     sequences = {record.id: str(record.seq)
