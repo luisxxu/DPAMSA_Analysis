@@ -44,6 +44,23 @@ def main():
                         type=int,
                         default=None,
                         help="Number of training episodes (overrides config.max_episode)")
+    parser.add_argument("--save",
+                        type=str,
+                        default=None,
+                        metavar="NAME",
+                        help="Save model weights to weights/NAME.pth after training")
+    parser.add_argument("--load",
+                        type=str,
+                        default=None,
+                        metavar="NAME",
+                        help="Load model weights from weights/NAME.pth before training "
+                             "(resume a previous run)")
+    parser.add_argument("--checkpoint",
+                        type=int,
+                        default=0,
+                        metavar="N",
+                        help="Save a checkpoint every N episodes during training "
+                             "(requires --save; filenames: weights/NAME_epN.pth)")
     parser.add_argument("--scoring",
                         type=str,
                         default="sp",
@@ -68,25 +85,27 @@ def main():
 
     # This if-then statement ensures that the correct training function is used.
     # For this project, the multi_train function is not used.
+    ckpt_args = dict(save=args.save, load=args.load, checkpoint=args.checkpoint)
+
     if args.num_datasets is not None:
         multi_train(sequences, args.num_datasets)
     elif args.algorithm == "dqn":
         if config.n_envs > 1:
             train_dqn_parallel(sequences, args.scoring)
         else:
-            train(sequences, args.scoring)
+            train(sequences, args.scoring, **ckpt_args)
     elif args.algorithm == "a2c":
         if config.n_envs > 1:
             train_a2c_parallel(sequences, args.scoring)
         else:
-            train_a2c(sequences, args.scoring)
+            train_a2c(sequences, args.scoring, **ckpt_args)
     elif args.algorithm == "ppo":
         if config.n_envs > 1:
             train_ppo_parallel(sequences, args.scoring)
         else:
-            train_ppo(sequences, args.scoring)
+            train_ppo(sequences, args.scoring, **ckpt_args)
     elif args.algorithm == "acer":
-        train_acer(sequences, args.scoring)
+        train_acer(sequences, args.scoring, **ckpt_args)
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +269,42 @@ def multi_train(sequences, num_datasets):
 
 
 # ---------------------------------------------------------------------------
+# Weight persistence helpers
+# ---------------------------------------------------------------------------
+
+_WEIGHT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights")
+
+
+def _weight_dir() -> str:
+    """Return (and create if necessary) the local weights/ directory."""
+    os.makedirs(_WEIGHT_DIR, exist_ok=True)
+    return _WEIGHT_DIR
+
+
+def _maybe_load(agent, name):
+    """Load weights from weights/NAME.pth if --load was given."""
+    if name:
+        agent.load(name, path=_weight_dir())
+
+
+def _maybe_save(agent, name):
+    """Save weights to weights/NAME.pth if --save was given."""
+    if name:
+        agent.save(name, path=_weight_dir())
+
+
+def _maybe_checkpoint(agent, name, interval, episode):
+    """Save a checkpoint if --checkpoint N and this is a checkpoint episode."""
+    if name and interval > 0 and (episode + 1) % interval == 0:
+        agent.save(f"{name}_ep{episode + 1}", path=_weight_dir())
+        print(f"  [checkpoint] weights/{name}_ep{episode + 1}.pth")
+
+
+# ---------------------------------------------------------------------------
 # DQN training
 # ---------------------------------------------------------------------------
 
-def train(sequences, scoring="sp"):
+def train(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     output_parameters()
 
 # Commented out the lines below as they relate to the unspecified data format.
@@ -268,9 +319,10 @@ def train(sequences, scoring="sp"):
         print(f"Sequence {key}")
     env = Environment(list(sequences.values()))
     agent = DQN(env.action_number, env.row, env.max_len, env.max_len * env.max_reward)
+    _maybe_load(agent, load)
     p = tqdm(range(config.max_episode))
 
-    for _ in p:
+    for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
@@ -281,8 +333,10 @@ def train(sequences, scoring="sp"):
                 break
             state = next_state
         agent.update_epsilon()
+        _maybe_checkpoint(agent, save, checkpoint, ep)
     # The end time for training is recorded for run time calculation
     train_end_time = time.monotonic()
+    _maybe_save(agent, save)
     # Print statement for checkpoint confirmation
     print("Training Complete")
     # Run time calculation
@@ -318,7 +372,7 @@ def train(sequences, scoring="sp"):
 # A2C training
 # ---------------------------------------------------------------------------
 
-def train_a2c(sequences, scoring="sp"):
+def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     """Train an Advantage Actor-Critic agent on the provided sequences.
 
     Loop structure:
@@ -336,9 +390,10 @@ def train_a2c(sequences, scoring="sp"):
 
     env   = Environment(list(sequences.values()))
     agent = ActorCritic(env.action_number, env.row, env.max_len)
+    _maybe_load(agent, load)
     p     = tqdm(range(config.max_episode))
 
-    for _ in p:
+    for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
@@ -350,8 +405,10 @@ def train_a2c(sequences, scoring="sp"):
             state = next_state
         # Update policy on the completed episode trajectory
         agent.update()
+        _maybe_checkpoint(agent, save, checkpoint, ep)
 
     train_end_time = time.monotonic()
+    _maybe_save(agent, save)
     print("Training Complete (A2C)")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
@@ -377,7 +434,7 @@ def train_a2c(sequences, scoring="sp"):
 # PPO training
 # ---------------------------------------------------------------------------
 
-def train_ppo(sequences, scoring="sp"):
+def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     """Train a PPO-Clip agent on the provided sequences.
 
     Loop structure:
@@ -396,9 +453,10 @@ def train_ppo(sequences, scoring="sp"):
 
     env   = Environment(list(sequences.values()))
     agent = PPO(env.action_number, env.row, env.max_len)
+    _maybe_load(agent, load)
     p     = tqdm(range(config.max_episode))
 
-    for _ in p:
+    for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
@@ -410,8 +468,10 @@ def train_ppo(sequences, scoring="sp"):
             state = next_state
         # Run ppo_epochs gradient steps on the collected episode rollout
         agent.update()
+        _maybe_checkpoint(agent, save, checkpoint, ep)
 
     train_end_time = time.monotonic()
+    _maybe_save(agent, save)
     print("Training Complete (PPO)")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
@@ -455,7 +515,7 @@ def output_parameters_acer():
     print("Device: {}".format(config.device_name))
 
 
-def train_acer(sequences, scoring="sp"):
+def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     """Train an ACER agent on the provided sequences.
 
     Loop structure:
@@ -472,6 +532,12 @@ def train_acer(sequences, scoring="sp"):
       • Replaying past episodes for better sample efficiency.
       • Adding a trust-region penalty (KL from EMA average policy) to prevent
         catastrophic policy updates.
+
+    Weight persistence:
+      • load  — resume from a previously saved checkpoint.
+      • save  — write final weights after training completes.
+      • checkpoint > 0 — additionally write weights/NAME_epN.pth every N episodes
+                          so training can survive interruptions.
     """
     output_parameters_acer()
     train_start_time = time.monotonic()
@@ -482,9 +548,10 @@ def train_acer(sequences, scoring="sp"):
 
     env   = Environment(list(sequences.values()))
     agent = ACER(env.action_number, env.row, env.max_len)
+    _maybe_load(agent, load)
     p     = tqdm(range(config.max_episode))
 
-    for _ in p:
+    for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
@@ -494,8 +561,10 @@ def train_acer(sequences, scoring="sp"):
                 break
             state = next_state
         agent.update()
+        _maybe_checkpoint(agent, save, checkpoint, ep)
 
     train_end_time = time.monotonic()
+    _maybe_save(agent, save)
     print("Training Complete (ACER)")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
