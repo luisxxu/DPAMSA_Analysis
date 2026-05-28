@@ -147,5 +147,106 @@ After collecting one episode, PPO runs `ppo_epochs=4` gradient steps on the same
 
 All three algorithms support `torch.compile`, mixed-precision (`torch.cuda.amp`), and gradient clipping.
 
+## Parallel Environments
+
+### Motivation
+
+The training bottleneck for on-policy algorithms (A2C, PPO) is not the gradient update — it is **data collection**. With a single environment, every forward pass processes exactly one state vector. Modern GPUs can process a batch of N state vectors in nearly the same wall-clock time as one, so running N environments simultaneously and stacking their states into a single `(N, state_dim)` tensor gives roughly N× data throughput at negligible extra cost.
+
+For DQN the benefit is different: N envs fill the replay buffer N× faster, so the agent reaches the minimum batch size sooner and begins learning from more diverse experience earlier in training.
+
+### New file: `parallel_env.py`
+
+`ParallelEnvironment` wraps `n_envs` independent `Environment` instances:
+
+```
+par_env = ParallelEnvironment(sequences, n_envs=4)
+states  = par_env.reset_all()          # list of 4 states
+
+while not par_env.all_done():
+    active_idx = [i for i,a in enumerate(par_env.active_mask) if a]
+    # ONE forward pass on a (|active|, state_dim) tensor
+    actions = batched_forward(active_states)
+    results = par_env.step_all(actions)
+```
+
+When an env finishes its episode (`done==0`) it is marked inactive; `step_all()` returns `(0.0, None, 0)` for inactive slots so callers can safely iterate the full list.
+
+### Changes to agents
+
+| File | Addition |
+|---|---|
+| `dqn.py` | `select_batch(states)` — batched epsilon-greedy; random actions are sampled independently, greedy actions use one forward pass |
+| `actor_critic.py` | `update_parallel(traj_s, traj_a, traj_r, traj_v, traj_d)` — computes per-trajectory returns, concatenates, normalises across all N trajectories, one gradient step |
+| `actor_critic.py` | `_gradient_step()` — extracted shared update logic (used by both `update()` and `update_parallel()`) |
+| `ppo.py` | `update_parallel(traj_s, traj_a, traj_lp, traj_r, traj_v, traj_d)` — per-trajectory GAE, concatenate, ppo_epochs clipped updates |
+| `ppo.py` | `_gae_for_traj()` (static), `_gradient_steps()` — extracted from `update()` for reuse |
+
+### New training functions in `main.py`
+
+| Function | Algorithm | What changes |
+|---|---|---|
+| `train_dqn_parallel()` | DQN | `select_batch()` per step; all N transitions pushed to shared replay buffer |
+| `train_a2c_parallel()` | A2C | `_collect_episode_parallel()` → `update_parallel()` |
+| `train_ppo_parallel()` | PPO | `_collect_episode_parallel()` (with log_probs) → `update_parallel()` |
+
+`_collect_episode_parallel()` is a shared helper in `main.py` that runs the episode loop across all N envs using a caller-supplied `forward_fn`, accumulating per-env trajectory dicts.
+
+### Dispatch
+
+Parallel training is automatic when `n_envs > 1` in `config.py` (default: 4):
+
+```bash
+python main.py sequences.fasta --algorithm ppo   # uses train_ppo_parallel (n_envs=4)
+```
+
+Set `n_envs = 1` in `config.py` to revert to the original single-env loops.
+
+## Profile-Based Scoring
+
+### Motivation
+
+The original `calc_score()` method scores the final alignment using Sum-of-Pairs (SP): for every column it iterates over all C(k, 2) pairs of sequences, giving O(L·k²) time. For alignments with many sequences, this inner loop becomes measurably slow. A PSSM-based approach achieves an equivalent score in O(L·k) time by exploiting C(n, 2) combinatorics — replacing the pairwise loop with a single per-column token count.
+
+### New methods — `env.py`
+
+| Method | Complexity | Description |
+|---|---|---|
+| `build_pssm()` | O(L·k) | Returns a `(L, VOCAB_SIZE)` numpy array of per-position nucleotide frequencies |
+| `calc_profile_score()` | O(L·k) | SP-equivalent score computed via C(n, 2) combinatorics on per-token counts |
+
+**`calc_profile_score()` derivation** — for each alignment column with k sequences:
+```
+g  = count of gap tokens (token ID 5)
+n  = k − g  (non-gap count)
+
+gap_pairs      = g*(k−g) + C(g,2)     # gap vs non-gap + gap vs gap
+match_pairs    = Σ C(count[nuc], 2)   # for each distinct non-gap token
+mismatch_pairs = C(n, 2) − match_pairs
+
+score_i = GAP_PENALTY*gap_pairs + MATCH_REWARD*match_pairs + MISMATCH_PENALTY*mismatch_pairs
+```
+
+Because `gap_pairs + match_pairs + mismatch_pairs = C(k, 2)`, this is *mathematically identical* to iterating all pairs — just O(k) per column instead of O(k²).
+
+### `--scoring` flag — `main.py`
+
+Select the scoring function at runtime:
+
+```bash
+python main.py sequences.fasta                          # sp (default)
+python main.py sequences.fasta --scoring profile        # profile score + PSSM table
+python main.py sequences.fasta --scoring both           # both scores + PSSM table
+python main.py sequences.fasta --algorithm ppo --scoring both
+```
+
+| Flag value | Output |
+|---|---|
+| `sp` (default) | Sum-of-Pairs score only |
+| `profile` | Profile score + PSSM frequency table |
+| `both` | SP score, profile score, and PSSM table |
+
+The `--scoring` flag works with all three algorithms (DQN, A2C, PPO) and both single-env and parallel training modes. The new `_print_results(env, scoring)` helper in `main.py` centralises all result reporting, replacing the previously duplicated output blocks across all six training functions.
+
 ### B. Embedding Scale (`√d_model`) — `models.py`
 Following Vaswani et al. (2017) *"Attention Is All You Need"*, token embeddings are now multiplied by `√d_model` (= 8 for `d_model=64`) before positional encoding is added. Without this scaling, the positional encoding signal — whose magnitude is fixed near 1 by the sinusoidal formula — overwhelms the token embedding signal, which tends to be small from random initialisation. Scaling the embeddings up restores the intended balance between token identity and positional information.

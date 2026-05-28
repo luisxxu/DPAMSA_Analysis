@@ -34,7 +34,7 @@ class Net(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x, self.mask(x, 0))
-        x = x.view(x.size()[0], -1)
+        x = x.reshape(x.size()[0], -1)
         x = self.f1(self.l1(x))
         x = self.f2(self.l2(x))
         x = self.f3(self.l3(x))
@@ -95,6 +95,39 @@ class DQN(ABC):
                 torch.LongTensor(state).unsqueeze(0).to(config.device))
             action = torch.argmax(action_val, 1).cpu().data.numpy()[0]
         return action
+
+    def select_batch(self, states):
+        """Batched epsilon-greedy for N states — one forward pass for all greedy actions.
+
+        Random actions are sampled independently (no GPU needed). Greedy actions
+        are evaluated together in a single (|greedy|, state_dim) forward pass,
+        which is much faster than N individual forward passes when many states
+        are in the greedy branch (i.e. late training when epsilon is low).
+
+        Args:
+            states: list of N state vectors (one per active environment).
+        Returns:
+            list of N integer actions.
+        """
+        n = len(states)
+        # Decide random vs greedy for each env independently
+        use_random = [random.random() <= self.current_epsilon for _ in range(n)]
+
+        # Start with random actions everywhere
+        actions = [int(np.random.randint(0, self.action_number)) for _ in range(n)]
+
+        # Overwrite greedy slots with one batched forward pass
+        greedy_idx = [i for i, r in enumerate(use_random) if not r]
+        if greedy_idx:
+            greedy_states = [states[i] for i in greedy_idx]
+            x = torch.LongTensor(greedy_states).to(config.device)
+            with torch.no_grad():
+                action_vals = self.eval_net(x)
+            greedy_actions = torch.argmax(action_vals, dim=1).cpu().numpy()
+            for j, env_i in enumerate(greedy_idx):
+                actions[env_i] = int(greedy_actions[j])
+
+        return actions
 
     def predict(self, state):
         action_val = self.eval_net.forward(

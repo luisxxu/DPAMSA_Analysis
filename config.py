@@ -65,6 +65,17 @@ ppo_entropy_coef = 0.01    # Entropy bonus coefficient (same purpose as A2C).
 gae_lambda       = 0.95    # GAE λ — smoothly interpolates between TD(0) (λ=0)
                             # and Monte-Carlo returns (λ=1).
 
+# ---------------------------------------------------------------------------
+# Parallel environments
+# ---------------------------------------------------------------------------
+n_envs = 4  # Number of independent environments to run in parallel.
+            # Each training step collects one batched forward pass across all
+            # active envs, giving ~n_envs× data throughput with only a small
+            # overhead from running N Python env objects.
+            # Set to 1 to disable and use the original single-env loop.
+
+assert n_envs >= 1, "n_envs must be at least 1."
+
 assert 0 < a2c_lr,           "A2C learning rate must be positive."
 assert 0 < ppo_lr,           "PPO learning rate must be positive."
 assert 0 < ppo_clip_eps < 1, "PPO clip epsilon must be in (0, 1)."

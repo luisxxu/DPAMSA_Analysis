@@ -1,0 +1,13 @@
+test_id,algo,reward,combo,sp_score,time_s
+test0,DQN,sp,DQN+sp,-588,27.52
+test1,DQN,sp,DQN+sp,-672,25.11
+test0,DQN,profile,DQN+profile,-648,27.93
+test1,DQN,profile,DQN+profile,-452,26.44
+test0,A2C,sp,A2C+sp,-216,0.87
+test1,A2C,sp,A2C+sp,-236,0.85
+test0,A2C,profile,A2C+profile,-712,0.84
+test1,A2C,profile,A2C+profile,-672,0.83
+test0,PPO,sp,PPO+sp,-688,1.85
+test1,PPO,sp,PPO+sp,-672,2.23
+test0,PPO,profile,PPO+profile,-688,1.92
+test1,PPO,profile,PPO+profile,-672,1.98

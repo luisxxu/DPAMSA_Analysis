@@ -42,7 +42,7 @@ class ActorCriticNet(nn.Module):
 
     def forward(self, x):
         enc    = self.encoder(x, (x != 0).unsqueeze(-2))
-        enc    = enc.view(enc.size(0), -1)
+        enc    = enc.reshape(enc.size(0), -1)
         logits = self.actor(enc)
         value  = self.critic(enc).squeeze(-1)
         return logits, value
@@ -140,7 +140,7 @@ class ActorCritic(ABC):
             return self.net.predict(x).item()
 
     # ------------------------------------------------------------------
-    # Update
+    # Update (single environment)
     # ------------------------------------------------------------------
 
     def update(self):
@@ -159,12 +159,68 @@ class ActorCritic(ABC):
         states_t  = torch.LongTensor(self._states).to(config.device)
         actions_t = torch.LongTensor(self._actions).to(config.device)
         returns_t = torch.FloatTensor(returns).to(config.device)
-        values_t  = torch.FloatTensor(self._values).to(config.device)
-        adv_t     = returns_t - values_t
-        # Normalise advantages — keeps gradient magnitudes stable across episodes
-        # of very different lengths (short vs long sequences)
+        adv_t     = returns_t - torch.FloatTensor(self._values).to(config.device)
+        adv_t     = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+
+        self._gradient_step(states_t, actions_t, returns_t, adv_t)
+
+        # Discard trajectory — on-policy means no replay
+        self._states.clear()
+        self._actions.clear()
+        self._rewards.clear()
+        self._values.clear()
+        self._dones.clear()
+
+    # ------------------------------------------------------------------
+    # Update (parallel environments)
+    # ------------------------------------------------------------------
+
+    def update_parallel(self, traj_s, traj_a, traj_r, traj_v, traj_d):
+        """Update from N parallel episode trajectories.
+
+        Computes per-trajectory discounted returns, concatenates them into
+        one batch, normalises advantages across all trajectories together,
+        then performs a single gradient step — equivalent to A2C with a
+        batch size N× larger than the single-env version.
+
+        Args:
+            traj_s/a/r/v/d : lists of N inner lists, one per environment.
+                             Each inner list holds the steps from that env's episode.
+        """
+        all_states, all_actions, all_returns, all_adv = [], [], [], []
+
+        for env_i in range(len(traj_r)):
+            if not traj_r[env_i]:
+                continue
+            # Per-trajectory discounted returns
+            R, returns = 0.0, []
+            for r, d in zip(reversed(traj_r[env_i]), reversed(traj_d[env_i])):
+                R = r + config.gamma * d * R
+                returns.insert(0, R)
+            adv = [ret - val for ret, val in zip(returns, traj_v[env_i])]
+            all_states.extend(traj_s[env_i])
+            all_actions.extend(traj_a[env_i])
+            all_returns.extend(returns)
+            all_adv.extend(adv)
+
+        if not all_states:
+            return
+
+        states_t  = torch.LongTensor(all_states).to(config.device)
+        actions_t = torch.LongTensor(all_actions).to(config.device)
+        returns_t = torch.FloatTensor(all_returns).to(config.device)
+        adv_t     = torch.FloatTensor(all_adv).to(config.device)
+        # Normalise across ALL n_envs trajectories — more stable than per-trajectory
         adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
+        self._gradient_step(states_t, actions_t, returns_t, adv_t)
+
+    # ------------------------------------------------------------------
+    # Shared gradient step (used by both update variants)
+    # ------------------------------------------------------------------
+
+    def _gradient_step(self, states_t, actions_t, returns_t, adv_t):
+        """One A2C gradient update on pre-assembled tensors."""
         with torch.cuda.amp.autocast(enabled=self._use_amp):
             log_probs, values, entropy = self.net.evaluate_actions(states_t, actions_t)
 
@@ -182,13 +238,6 @@ class ActorCritic(ABC):
         torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=0.5)
         self.scaler.step(self.optimizer)
         self.scaler.update()
-
-        # Discard trajectory — on-policy means no replay
-        self._states.clear()
-        self._actions.clear()
-        self._rewards.clear()
-        self._values.clear()
-        self._dones.clear()
 
     # ------------------------------------------------------------------
     # Persistence

@@ -100,7 +100,7 @@ class PPO(ABC):
             return self.net.predict(x).item()
 
     # ------------------------------------------------------------------
-    # Update
+    # Update (single environment)
     # ------------------------------------------------------------------
 
     def update(self):
@@ -108,33 +108,113 @@ class PPO(ABC):
         if not self._rewards:
             return
 
-        advantages, returns = self._compute_gae()
+        advantages, returns = self._gae_for_traj(
+            self._rewards, self._values, self._dones)
 
         states_t  = torch.LongTensor(self._states).to(config.device)
         actions_t = torch.LongTensor(self._actions).to(config.device)
         old_lp_t  = torch.FloatTensor(self._log_probs).to(config.device)
         returns_t = torch.FloatTensor(returns).to(config.device)
         adv_t     = torch.FloatTensor(advantages).to(config.device)
-        # Normalise advantages within the batch for stable gradient magnitudes
-        adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+        adv_t     = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
+        self._gradient_steps(states_t, actions_t, old_lp_t, returns_t, adv_t)
+
+        # Clear rollout buffer — the old-policy log-probs are now stale
+        self._states.clear()
+        self._actions.clear()
+        self._log_probs.clear()
+        self._rewards.clear()
+        self._values.clear()
+        self._dones.clear()
+
+    # ------------------------------------------------------------------
+    # Update (parallel environments)
+    # ------------------------------------------------------------------
+
+    def update_parallel(self, traj_s, traj_a, traj_lp, traj_r, traj_v, traj_d):
+        """Update from N parallel episode trajectories.
+
+        Computes per-trajectory GAE, concatenates into one large batch,
+        normalises advantages across all N trajectories, then runs
+        ppo_epochs clipped updates — equivalent to PPO on a rollout N×
+        the size of the single-env version.
+
+        Args:
+            traj_s/a/lp/r/v/d : lists of N inner lists, one per environment.
+                                 traj_lp holds log π_old(a|s) from collection.
+        """
+        all_states, all_actions, all_log_probs = [], [], []
+        all_returns, all_adv = [], []
+
+        for env_i in range(len(traj_r)):
+            if not traj_r[env_i]:
+                continue
+            adv, returns = self._gae_for_traj(
+                traj_r[env_i], traj_v[env_i], traj_d[env_i])
+            all_states.extend(traj_s[env_i])
+            all_actions.extend(traj_a[env_i])
+            all_log_probs.extend(traj_lp[env_i])
+            all_returns.extend(returns)
+            all_adv.extend(adv)
+
+        if not all_states:
+            return
+
+        states_t  = torch.LongTensor(all_states).to(config.device)
+        actions_t = torch.LongTensor(all_actions).to(config.device)
+        old_lp_t  = torch.FloatTensor(all_log_probs).to(config.device)
+        returns_t = torch.FloatTensor(all_returns).to(config.device)
+        adv_t     = torch.FloatTensor(all_adv).to(config.device)
+        adv_t     = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+
+        self._gradient_steps(states_t, actions_t, old_lp_t, returns_t, adv_t)
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _gae_for_traj(rewards, values, dones):
+        """GAE for a single trajectory.
+
+        δ_t  = r_t + γ · done_t · V(s_{t+1}) − V(s_t)
+        Â_t  = δ_t + γλ · done_t · Â_{t+1}
+
+        Bootstrap value = 0 (episodes always terminate naturally, last done==0).
+        done=1.0 → discount future; done=0.0 → terminal, stop accumulation.
+        """
+        advantages      = []
+        gae             = 0.0
+        values_extended = list(values) + [0.0]
+
+        for t in reversed(range(len(rewards))):
+            d     = dones[t]
+            delta = (rewards[t]
+                     + config.gamma * d * values_extended[t + 1]
+                     - values_extended[t])
+            gae   = delta + config.gamma * config.gae_lambda * d * gae
+            advantages.insert(0, gae)
+
+        returns = [adv + val for adv, val in zip(advantages, values)]
+        return advantages, returns
+
+    def _gradient_steps(self, states_t, actions_t, old_lp_t, returns_t, adv_t):
+        """Run ppo_epochs clipped PPO updates on pre-assembled tensors."""
         for _ in range(config.ppo_epochs):
             with torch.cuda.amp.autocast(enabled=self._use_amp):
                 new_log_probs, values, entropy = self.net.evaluate_actions(
                     states_t, actions_t)
 
-                # Probability ratio π_new / π_old (computed in log-space for
-                # numerical stability — avoids very small float products)
+                # Probability ratio π_new / π_old (log-space for stability)
                 ratio = torch.exp(new_log_probs - old_lp_t)
 
-                # Clipped surrogate: take whichever is more conservative
                 surr_unclipped = ratio * adv_t
                 surr_clipped   = torch.clamp(
                     ratio,
                     1.0 - config.ppo_clip_eps,
                     1.0 + config.ppo_clip_eps) * adv_t
                 policy_loss  = -torch.min(surr_unclipped, surr_clipped).mean()
-
                 value_loss   = F.smooth_l1_loss(values, returns_t)
                 entropy_loss = -entropy.mean()
 
@@ -148,45 +228,6 @@ class PPO(ABC):
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=0.5)
             self.scaler.step(self.optimizer)
             self.scaler.update()
-
-        # Clear rollout buffer — the old-policy log-probs are now stale
-        self._states.clear()
-        self._actions.clear()
-        self._log_probs.clear()
-        self._rewards.clear()
-        self._values.clear()
-        self._dones.clear()
-
-    # ------------------------------------------------------------------
-    # GAE
-    # ------------------------------------------------------------------
-
-    def _compute_gae(self):
-        """Compute GAE advantages and discounted returns.
-
-        Bootstrap value at the end of the rollout is 0 because every episode
-        in this environment terminates naturally (last done == 0.0).
-
-        δ_t  = r_t + γ · done_t · V(s_{t+1}) − V(s_t)
-        Â_t  = δ_t + γλ · done_t · Â_{t+1}
-        R_t  = Â_t + V(s_t)
-
-        done=1.0 → discount future; done=0.0 → terminal, stop accumulation.
-        """
-        advantages       = []
-        gae              = 0.0
-        values_extended  = self._values + [0.0]  # bootstrap = 0 at terminal
-
-        for t in reversed(range(len(self._rewards))):
-            d     = self._dones[t]
-            delta = (self._rewards[t]
-                     + config.gamma * d * values_extended[t + 1]
-                     - values_extended[t])
-            gae   = delta + config.gamma * config.gae_lambda * d * gae
-            advantages.insert(0, gae)
-
-        returns = [adv + val for adv, val in zip(advantages, self._values)]
-        return advantages, returns
 
     # ------------------------------------------------------------------
     # Persistence

@@ -132,6 +132,71 @@ class Environment:
 
         return score
 
+    def build_pssm(self):
+        """Build a position-specific scoring matrix (PSSM) of nucleotide frequencies.
+
+        Returns an ndarray of shape (L, VOCAB_SIZE) where pssm[i, token_id] is
+        the observed frequency of that token at alignment column i.  O(L × k).
+
+        Returns:
+            numpy ndarray, shape (L, VOCAB_SIZE), dtype float32.
+            An empty (0, VOCAB_SIZE) array is returned if the alignment is empty.
+        """
+        if not self.aligned or not self.aligned[0]:
+            return np.zeros((0, VOCAB_SIZE), dtype=np.float32)
+        L = len(self.aligned[0])
+        pssm = np.zeros((L, VOCAB_SIZE), dtype=np.float32)
+        for j in range(self.row):
+            for i in range(L):
+                nuc = self.aligned[j][i]
+                if 0 <= nuc < VOCAB_SIZE:
+                    pssm[i, nuc] += 1.0
+        pssm /= self.row  # normalise: counts → frequencies
+        return pssm
+
+    def calc_profile_score(self):
+        """Profile-based MSA score computed via C(n, 2) combinatorics — O(L × k).
+
+        Produces the same numeric result as calc_score() (SP score) but avoids
+        the O(k²) all-pairs inner loop by deriving pair counts from per-token
+        tallies in a single pass over each column.
+
+        For each alignment column i with k sequences:
+            g  = count of gap tokens (token ID 5)
+            n  = k − g  (non-gap count)
+
+            gap_pairs      = g*(k−g) + C(g,2)   [gap vs non-gap + gap vs gap]
+            match_pairs    = Σ C(count[nuc], 2)  for nuc ≠ gap
+            mismatch_pairs = C(n, 2) − match_pairs
+
+            score_i = GAP_PENALTY*gap_pairs
+                    + MATCH_REWARD*match_pairs
+                    + MISMATCH_PENALTY*mismatch_pairs
+
+        Returns:
+            int — total alignment score (identical to calc_score()).
+        """
+        if not self.aligned or not self.aligned[0]:
+            return 0
+        L   = len(self.aligned[0])
+        k   = self.row
+        c2  = lambda n: n * (n - 1) // 2  # C(n, 2)
+        total = 0
+        for i in range(L):
+            counts = {}
+            for j in range(k):
+                nuc = self.aligned[j][i]
+                counts[nuc] = counts.get(nuc, 0) + 1
+            g              = counts.get(5, 0)   # gap token ID = 5
+            n              = k - g
+            gap_pairs      = g * n + c2(g)
+            match_pairs    = sum(c2(cnt) for nuc, cnt in counts.items() if nuc != 5)
+            mismatch_pairs = c2(n) - match_pairs
+            total += (config.GAP_PENALTY      * gap_pairs
+                    + config.MATCH_REWARD     * match_pairs
+                    + config.MISMATCH_PENALTY * mismatch_pairs)
+        return total
+
     def calc_exact_matched(self):
         score = 0
 
