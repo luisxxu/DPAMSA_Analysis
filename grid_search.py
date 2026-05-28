@@ -86,16 +86,18 @@ from env import Environment
 from dqn import DQN
 from actor_critic import ActorCritic
 from ppo import PPO
+from acer import ACER
 
 # ── constants ─────────────────────────────────────────────────────────────────
-ALGORITHMS    = ["DQN", "A2C", "PPO"]
+ALGORITHMS    = ["DQN", "A2C", "PPO", "ACER"]
 REWARD_TYPES  = ["sp", "profile"]
 GAP_TOKEN     = 5
 
 ALGO_COLORS = {
-    "DQN": "#2196F3",   # blue
-    "A2C": "#4CAF50",   # green
-    "PPO": "#FF9800",   # orange
+    "DQN":  "#2196F3",   # blue
+    "A2C":  "#4CAF50",   # green
+    "PPO":  "#FF9800",   # orange
+    "ACER": "#9C27B0",   # purple
 }
 REWARD_HATCHES = {
     "sp":      "",
@@ -307,7 +309,36 @@ def run_ppo(seqs: list, reward_type: str, episodes: int, d_model: int = 64) -> i
     return _run_inference(agent, env)
 
 
-_RUNNERS = {"DQN": run_dqn, "A2C": run_a2c, "PPO": run_ppo}
+def run_acer(seqs: list, reward_type: str, episodes: int, d_model: int = 64) -> int:
+    """Train ACER and return the final SP score after greedy inference.
+
+    ACER directly accepts d_model — no monkey-patching needed.
+    Each call to agent.update() performs:
+      • 1 on-policy gradient step on the just-completed episode
+      • acer_replay_ratio off-policy steps from random buffered episodes
+      • EMA update of the average policy network
+    """
+    env = Environment(seqs)
+    if reward_type == "profile":
+        _patch_profile_reward(env)
+
+    agent = ACER(env.action_number, env.row, env.max_len, d_model)
+
+    for _ in range(episodes):
+        state = env.reset()
+        while True:
+            action        = agent.select(state)
+            rew, ns, done = env.step(action)
+            agent.record_transition(rew, float(done))
+            if done == 0:
+                break
+            state = ns
+        agent.update()
+
+    return _run_inference(agent, env)
+
+
+_RUNNERS = {"DQN": run_dqn, "A2C": run_a2c, "PPO": run_ppo, "ACER": run_acer}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

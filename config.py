@@ -81,3 +81,29 @@ assert 0 < ppo_lr,           "PPO learning rate must be positive."
 assert 0 < ppo_clip_eps < 1, "PPO clip epsilon must be in (0, 1)."
 assert 0 < ppo_epochs,       "PPO epochs must be at least 1."
 assert 0 <= gae_lambda <= 1, "GAE lambda must be in [0, 1]."
+
+# ---------------------------------------------------------------------------
+# ACER (Actor-Critic with Experience Replay) hyperparameters
+# ---------------------------------------------------------------------------
+acer_lr                 = 3e-4   # Adam learning rate — same scale as A2C/PPO.
+acer_c_bar              = 10.0   # IS truncation threshold.  min(c_bar, ρ_t)
+                                  # bounds the variance of off-policy updates.
+acer_replay_size        = 200    # Maximum number of complete episodes stored
+                                  # in the replay buffer.
+acer_replay_ratio       = 4      # Off-policy gradient updates per on-policy
+                                  # update.  Higher → more sample reuse but
+                                  # greater risk of stale-policy bias.
+acer_trust_region_delta = 1.0    # KL penalty coefficient.  Scales the
+                                  # KL(π_avg ∥ π_θ) term in the loss, acting
+                                  # as a soft trust-region constraint.
+acer_ema_alpha          = 0.995  # EMA decay for the average policy network.
+                                  # Closer to 1 → slower-moving average.
+acer_value_coef         = 0.5    # Weight of the Q-head (critic) loss.
+acer_entropy_coef       = 0.01   # Entropy bonus weight (same purpose as A2C).
+
+assert 0 < acer_lr,                    "ACER learning rate must be positive."
+assert 0 < acer_c_bar,                 "ACER c_bar must be positive."
+assert 0 < acer_replay_size,           "ACER replay buffer must hold at least 1 episode."
+assert 0 < acer_replay_ratio,          "ACER replay ratio must be at least 1."
+assert 0 < acer_trust_region_delta,    "ACER trust-region delta must be positive."
+assert 0 < acer_ema_alpha < 1,         "ACER EMA alpha must be in (0, 1)."
