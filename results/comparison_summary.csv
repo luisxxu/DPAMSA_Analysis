@@ -1,0 +1,18 @@
+dataset,method,count,mean,std,median,min,max
+dataset1_3x30bp,ClustalOmega,50,-185.76,54.96,-180.0,-328,-104
+dataset1_3x30bp,DPAMSA,50,-211.84,38.97,-214.0,-312,-116
+dataset1_3x30bp,DPAMSA Profile,50,-211.84,38.97,-214.0,-312,-116
+dataset1_3x30bp,GA-DPAMSA,50,-189.28,44.56,-184.0,-340,-104
+dataset1_3x30bp,GA-DPAMSA Profile,50,-189.28,44.56,-184.0,-340,-104
+dataset1_3x30bp,MSAProbs,50,-143.52,47.17,-134.0,-252,-60
+dataset1_6x30bp,ClustalOmega,50,-1287.52,305.23,-1232.0,-2264,-876
+dataset1_6x30bp,ClustalW,50,-1032.24,189.37,-1012.0,-1644,-636
+dataset1_6x30bp,DPAMSA,50,-1149.52,146.48,-1140.0,-1692,-900
+dataset1_6x30bp,DPAMSA Profile,50,-1149.52,146.48,-1140.0,-1692,-900
+dataset1_6x30bp,GA-DPAMSA,50,-905.36,93.01,-892.0,-1164,-640
+dataset1_6x30bp,GA-DPAMSA Profile,50,-941.2,130.57,-916.0,-1268,-688
+dataset1_6x30bp,MSAProbs,50,-1070.4,212.62,-1036.0,-1640,-672
+dataset1_6x60bp,ClustalOmega,50,-2449.28,428.97,-2424.0,-3336,-1600
+dataset1_6x60bp,ClustalW,50,-1890.56,263.96,-1858.0,-2544,-1360
+dataset1_6x60bp,GA-DPAMSA,50,-1819.12,136.31,-1792.0,-2316,-1624
+dataset1_6x60bp,MSAProbs,50,-2384.32,413.79,-2322.0,-3380,-1748
