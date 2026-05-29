@@ -35,6 +35,7 @@ Interface (mirrors A2C / PPO):
   predict(state)             — greedy action for inference
 """
 
+import math
 import os
 import torch
 import torch.nn as nn
@@ -265,6 +266,16 @@ class ACER:
             [e[1] for e in episode]).to(config.device)              # (T,)
         rewards = torch.FloatTensor(
             [e[2] for e in episode]).to(config.device)              # (T,)
+
+        # ── Per-pair reward normalisation ─────────────────────────────────────
+        # SP reward = sum over C(seq_num,2) pairs → scales as O(seq_num²).
+        # Dividing by n_pairs keeps reward magnitude ≈ ±4 regardless of how
+        # many sequences are in the dataset, so acer_entropy_coef is comparable
+        # across 3×30 bp (3 pairs) and 6×30 bp / 6×60 bp (15 pairs).
+        _seq_num = int(math.log2(self.action_number + 1))
+        _n_pairs = max(1, _seq_num * (_seq_num - 1) // 2)
+        rewards  = rewards / _n_pairs
+
         dones   = torch.FloatTensor(
             [e[3] for e in episode]).to(config.device)              # (T,)
         log_mu  = torch.FloatTensor(                                # (T, A)
