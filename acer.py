@@ -186,7 +186,7 @@ class ACER:
         self.optimizer = torch.optim.Adam(
             self.net.parameters(), lr=config.acer_lr)
         self._use_amp = torch.cuda.is_available()
-        self.scaler   = torch.cuda.amp.GradScaler(enabled=self._use_amp)
+        self.scaler   = torch.amp.GradScaler("cuda", enabled=self._use_amp)
 
         self.replay = EpisodeBuffer(config.acer_replay_size)
 
@@ -284,7 +284,7 @@ class ACER:
 
         idx_t = torch.arange(T, device=config.device)
 
-        with torch.cuda.amp.autocast(enabled=self._use_amp):
+        with torch.amp.autocast("cuda", enabled=self._use_amp):
 
             # ── Forward: online network ───────────────────────────────────────
             logits, q_all, v = self.net(states)         # (T,A), (T,A), (T,)
