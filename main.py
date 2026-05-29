@@ -471,8 +471,53 @@ def _check_early_stop(agent, seqs_list: list, ep: int,
     return eval_score, new_best, new_pat, False
 
 
+def _run_mafft(fasta_path: str, seqs_list: list) -> "int | None":
+    """Run MAFFT on *fasta_path* and return its SP score using the same scoring
+    system as the RL environment.
+
+    The aligned output from MAFFT is fed into a fresh Environment via
+    set_alignment(), so the score is directly comparable to the RL agent's score.
+
+    Returns None if MAFFT is not installed, times out, or fails.
+    """
+    import subprocess
+    import io as _io
+
+    try:
+        proc = subprocess.run(
+            ["mafft", "--auto", "--quiet", fasta_path],
+            capture_output=True, text=True, timeout=300,
+        )
+    except FileNotFoundError:
+        print("  [MAFFT] not installed — skipping MAFFT comparison")
+        return None
+    except subprocess.TimeoutExpired:
+        print("  [MAFFT] timed out after 300 s")
+        return None
+
+    if proc.returncode != 0:
+        print(f"  [MAFFT] error (exit {proc.returncode}): {proc.stderr[:200]}")
+        return None
+
+    from Bio import SeqIO as _SeqIO
+    aligned_seqs = [str(r.seq) for r in _SeqIO.parse(_io.StringIO(proc.stdout), "fasta")]
+
+    if len(aligned_seqs) != len(seqs_list):
+        print(f"  [MAFFT] sequence count mismatch "
+              f"({len(aligned_seqs)} output vs {len(seqs_list)} input)")
+        return None
+
+    # Score with the identical gap/match/mismatch penalties used during RL training
+    eval_env = Environment(seqs_list)
+    eval_env.set_alignment(aligned_seqs)
+    score = eval_env.calc_score()
+    print(f"  [MAFFT] SP score = {score}")
+    return score
+
+
 def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
-                               results_csv, figures_dir, no_compare):
+                               results_csv, figures_dir, no_compare,
+                               mafft_score=None):
     """Look up benchmark data, print comparison, update CSV and figures.
 
     Silently skips if:
@@ -484,7 +529,8 @@ def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
         return
     try:
         record = bc.lookup(fasta_path, sp_score,
-                           episodes=episodes, time_s=time_s)
+                           episodes=episodes, time_s=time_s,
+                           mafft_score=mafft_score)
         bc.print_comparison(record)
         if results_csv:
             bc.append_results(record, results_csv)
@@ -579,9 +625,11 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     _print_results(env, scoring)
     print("********************************\n")
     if fasta_path:
+        mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
                                   config.max_episode, train_time,
-                                  results_csv, figures_dir, no_compare)
+                                  results_csv, figures_dir, no_compare,
+                                  mafft_score=mafft_score)
 
 
 # ---------------------------------------------------------------------------
@@ -656,10 +704,12 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     _print_results(env, scoring)
     print("********************************\n")
     if fasta_path:
+        mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
                                   config.max_episode,
                                   train_end_time - train_start_time,
-                                  results_csv, figures_dir, no_compare)
+                                  results_csv, figures_dir, no_compare,
+                                  mafft_score=mafft_score)
 
 
 # ---------------------------------------------------------------------------
@@ -735,10 +785,12 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     _print_results(env, scoring)
     print("********************************\n")
     if fasta_path:
+        mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
                                   config.max_episode,
                                   train_end_time - train_start_time,
-                                  results_csv, figures_dir, no_compare)
+                                  results_csv, figures_dir, no_compare,
+                                  mafft_score=mafft_score)
 
 
 # ---------------------------------------------------------------------------
@@ -846,10 +898,12 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     _print_results(env, scoring)
     print("********************************\n")
     if fasta_path:
+        mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
                                   config.max_episode,
                                   train_end_time - train_start_time,
-                                  results_csv, figures_dir, no_compare)
+                                  results_csv, figures_dir, no_compare,
+                                  mafft_score=mafft_score)
 
 
 # ---------------------------------------------------------------------------
