@@ -55,23 +55,30 @@ _BENCHMARK_CSVS: dict[str, str] = {
 }
 
 # Display names for each method (column order for plots)
+# _CLASSICAL_TOOLS: scores loaded from pre-computed benchmark CSVs
+# _RUNTIME_TOOLS:   scores computed live during a run (e.g. MAFFT)
 _CLASSICAL_TOOLS = ["SP_ClustalOmega", "SP_MSAProbs", "SP_ClustalW"]
+_RUNTIME_TOOLS   = ["SP_MAFFT"]
+_ALL_TOOLS       = _CLASSICAL_TOOLS + _RUNTIME_TOOLS   # used for display / figures
+
 _TOOL_LABELS     = {
     "SP_ACER":         "ACER",
     "SP_ClustalOmega": "ClustalOmega",
     "SP_MSAProbs":     "MSAProbs",
     "SP_ClustalW":     "ClustalW",
+    "SP_MAFFT":        "MAFFT",
 }
 _TOOL_COLORS = {
     "SP_ACER":         "#9C27B0",   # purple
     "SP_ClustalOmega": "#2196F3",   # blue
     "SP_MSAProbs":     "#4CAF50",   # green
     "SP_ClustalW":     "#FF9800",   # orange
+    "SP_MAFFT":        "#F44336",   # red
 }
 
 # Columns saved in the cumulative results CSV
 _CSV_COLS = ["dataset", "test_id", "episodes", "time_s",
-             "SP_ACER", "SP_ClustalOmega", "SP_MSAProbs", "SP_ClustalW"]
+             "SP_ACER", "SP_ClustalOmega", "SP_MSAProbs", "SP_ClustalW", "SP_MAFFT"]
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -128,7 +135,8 @@ def _load_benchmark_row(dataset_key: str, test_stem: str) -> dict[str, float | N
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def lookup(fasta_path: str, agent_score: float,
-           episodes: int = 0, time_s: float = 0.0) -> dict:
+           episodes: int = 0, time_s: float = 0.0,
+           mafft_score: "float | None" = None) -> dict:
     """Build a full comparison record for one training run.
 
     Parameters
@@ -137,11 +145,12 @@ def lookup(fasta_path: str, agent_score: float,
     agent_score : SP score returned by the RL agent after inference
     episodes    : number of training episodes (for the record)
     time_s      : training wall-clock time in seconds
+    mafft_score : SP score from MAFFT (computed live); None if unavailable
 
     Returns
     -------
     dict with keys: dataset, test_id, episodes, time_s,
-                    SP_ACER, SP_ClustalOmega, SP_MSAProbs, SP_ClustalW
+                    SP_ACER, SP_ClustalOmega, SP_MSAProbs, SP_ClustalW, SP_MAFFT
     """
     dataset_key, test_stem = _detect_dataset(fasta_path)
     bench = _load_benchmark_row(dataset_key, test_stem)
@@ -158,6 +167,7 @@ def lookup(fasta_path: str, agent_score: float,
         "SP_ClustalOmega": bench["SP_ClustalOmega"],
         "SP_MSAProbs":     bench["SP_MSAProbs"],
         "SP_ClustalW":     bench["SP_ClustalW"],
+        "SP_MAFFT":        mafft_score,
     }
 
 
@@ -169,7 +179,7 @@ def print_comparison(record: dict) -> None:
 
     # Collect all valid (method, score) pairs
     methods = [("ACER", record["SP_ACER"])]
-    for col in _CLASSICAL_TOOLS:
+    for col in _ALL_TOOLS:
         val = record.get(col)
         if val is not None:
             methods.append((_TOOL_LABELS[col], val))
@@ -240,11 +250,16 @@ def generate_figures(csv_path: str, figures_dir: str) -> list[str]:
     if df.empty:
         return []
 
+    # Back-fill any columns absent from older CSVs (e.g. SP_MAFFT added later)
+    for col in _CSV_COLS:
+        if col not in df.columns:
+            df[col] = float("nan")
+
     os.makedirs(figures_dir, exist_ok=True)
     saved = []
 
-    # Determine which classical tools have data
-    available = [c for c in _CLASSICAL_TOOLS if df[c].notna().any()]
+    # Determine which tools have at least one non-NaN value
+    available = [c for c in _ALL_TOOLS if df[c].notna().any()]
     all_methods = ["SP_ACER"] + available
     n_tests = len(df)
 
@@ -354,7 +369,7 @@ def generate_figures(csv_path: str, figures_dir: str) -> list[str]:
     # Build cell text: "score\n(rank)"
     cell_text = []
     cell_colors = []
-    rank_palette = {1: "#A5D6A7", 2: "#FFF9C4", 3: "#FFCC80", 4: "#EF9A9A"}
+    rank_palette = {1: "#A5D6A7", 2: "#FFF9C4", 3: "#FFCC80", 4: "#EF9A9A", 5: "#CE93D8"}
 
     for _, row in df.iterrows():
         row_text   = [row["test_id"]]
@@ -398,6 +413,7 @@ def generate_figures(csv_path: str, figures_dir: str) -> list[str]:
         mpatches.Patch(color=rank_palette[2], label="Rank 2"),
         mpatches.Patch(color=rank_palette[3], label="Rank 3"),
         mpatches.Patch(color=rank_palette[4], label="Rank 4"),
+        mpatches.Patch(color=rank_palette[5], label="Rank 5"),
     ]
     ax4.legend(handles=legend_patches, loc="upper right",
                fontsize=8, framealpha=0.9,
