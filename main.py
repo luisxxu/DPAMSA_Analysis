@@ -896,12 +896,8 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
               f"over {config.max_episode} episodes")
 
     seqs_list = list(sequences.values())
-    # n_history=1: include the last aligned column in the state so the agent
-    # can make context-aware decisions (e.g. avoid back-to-back gap columns).
-    env       = Environment(seqs_list, n_history=1)
-    # max_seq_len passed to the network must account for the extra history slot
-    # so that dim = seq_num × (max_len + n_history + 1) matches state length.
-    agent     = ACER(env.action_number, env.row, env.max_len + env.n_history)
+    env       = Environment(seqs_list)
+    agent     = ACER(env.action_number, env.row, env.max_len)
     _maybe_load(agent, load)
     classical = _bench_classical_scores(fasta_path) if fasta_path else []
     p         = tqdm(range(config.max_episode))
@@ -929,8 +925,7 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
         if eval_interval > 0 and (ep + 1) % eval_interval == 0:
             _, best_score, patience_counter, stop = _check_early_stop(
                 agent, seqs_list, ep, best_score, patience_counter,
-                patience, min_delta, classical, target_rank, save, p,
-                n_history=env.n_history)
+                patience, min_delta, classical, target_rank, save, p)
             if stop:
                 break
 
