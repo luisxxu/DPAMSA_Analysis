@@ -1,4 +1,12 @@
 name: dpamsa
+# ─────────────────────────────────────────────────────────────────────────────
+# USE THIS FILE on a fresh local machine where you control disk space.
+#
+# ON DATAHUB / DSMLP — do NOT run `conda env create` from this file;
+# the base environment already has PyTorch+CUDA and disk quotas are tight.
+# Instead run:  bash setup_env.sh
+# That installs only the missing packages (~5 MB) into the existing kernel.
+# ─────────────────────────────────────────────────────────────────────────────
 channels:
   - pytorch
   - nvidia
@@ -7,23 +15,16 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  # ── Deep learning ────────────────────────────────────────────────────────────
-  # pytorch-cuda picks the GPU-enabled wheel; conda-forge resolves CUDA libs.
-  # Change 11.8 → 12.1 if your DataHub node reports CUDA 12.x (check: nvidia-smi)
+  # PyTorch — change cuda version to match your driver (check: nvidia-smi)
   - pytorch::pytorch
   - pytorch::pytorch-cuda=11.8
-  - nvidia::cuda-toolkit=11.8
-  # ── Scientific stack ─────────────────────────────────────────────────────────
+  # Scientific stack
   - numpy
   - pandas
   - matplotlib
   - scipy
-  # ── Bioinformatics ───────────────────────────────────────────────────────────
-  - biopython
-  - bioconda::mafft
-  # ── Utilities ────────────────────────────────────────────────────────────────
+  # Bioinformatics
+  - biopython          # ~5 MB
+  - bioconda::mafft    # ~3 MB
+  # Utilities
   - tqdm
-  - pip
-  - pip:
-      # nothing that can't be conda-installed, but kept as a fallback section
-      []
