@@ -483,13 +483,16 @@ def _run_mafft(fasta_path: str, seqs_list: list) -> "int | None":
     import subprocess
     import io as _io
 
+    # Allow the run scripts to point at a downloaded binary via MAFFT_BIN
+    mafft_cmd = os.environ.get("MAFFT_BIN", "mafft")
+
     try:
         proc = subprocess.run(
-            ["mafft", "--auto", "--quiet", fasta_path],
+            [mafft_cmd, "--auto", "--quiet", fasta_path],
             capture_output=True, text=True, timeout=300,
         )
     except FileNotFoundError:
-        print("  [MAFFT] not installed — skipping MAFFT comparison")
+        print(f"  [MAFFT] not found ({mafft_cmd}) — skipping MAFFT comparison")
         return None
     except subprocess.TimeoutExpired:
         print("  [MAFFT] timed out after 300 s")
