@@ -44,7 +44,7 @@ for i in $(seq "$START" "$END"); do
 
     echo ""
     echo "--- test${i} ---"
-    python main.py "$FASTA" \
+    $(which python) main.py "$FASTA" \
         --algorithm acer \
         --scoring sp \
         --episodes "$EPISODES" \
