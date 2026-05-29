@@ -104,6 +104,21 @@ def main():
                             help="KL penalty coefficient for trust-region "
                                  f"(default → config.acer_trust_region_delta="
                                  f"{config.acer_trust_region_delta})")
+    acer_group.add_argument("--acer-entropy-end", type=float, default=None,
+                            metavar="COEF",
+                            help="If set, the entropy coefficient is annealed "
+                                 "exponentially from --acer-entropy down to this "
+                                 "value over the full episode budget.  Encourages "
+                                 "broad exploration early and tight exploitation "
+                                 "late.  Example: --acer-entropy 1.0 "
+                                 "--acer-entropy-end 0.01")
+    acer_group.add_argument("--acer-inference-rollouts", type=int, default=1,
+                            metavar="N",
+                            help="Number of stochastic rollouts to run at "
+                                 "inference time; the alignment with the highest "
+                                 "SP score is used.  N=1 = single greedy rollout "
+                                 "(default).  N≥2 provides a free improvement at "
+                                 "the cost of ~N× longer inference.")
 
     # ── Benchmark comparison ───────────────────────────────────────────────────
     bench_group = parser.add_argument_group(
@@ -162,6 +177,7 @@ def main():
     if args.acer_replay_ratio  is not None: config.acer_replay_ratio       = args.acer_replay_ratio
     if args.acer_cbar          is not None: config.acer_c_bar              = args.acer_cbar
     if args.acer_trust_delta   is not None: config.acer_trust_region_delta = args.acer_trust_delta
+    # acer_entropy_end and acer_inference_rollouts are passed directly to train_acer
 
     # Load sequences from the fasta file using the BioPython tools
     sequences = {record.id: str(record.seq)
@@ -179,6 +195,8 @@ def main():
         patience=args.patience,
         min_delta=args.min_delta,
         target_rank=args.target_rank,
+        entropy_end=args.acer_entropy_end,
+        inference_rollouts=args.acer_inference_rollouts,
     )
 
     if args.num_datasets is not None:
@@ -833,7 +851,8 @@ def output_parameters_acer():
 
 def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
                fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
-               eval_interval=100, patience=0, min_delta=0.0, target_rank=None):
+               eval_interval=100, patience=0, min_delta=0.0, target_rank=None,
+               entropy_end=None, inference_rollouts=1):
     """Train an ACER agent on the provided sequences.
 
     Loop structure:
@@ -864,6 +883,15 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     for key in sequences:
         print(f"Sequence {key}")
 
+    # Entropy annealing: if entropy_end is set, decay exponentially from the
+    # current config.acer_entropy_coef down to entropy_end over the full run.
+    entropy_start = config.acer_entropy_coef
+    _do_anneal    = (entropy_end is not None and entropy_end < entropy_start
+                     and config.max_episode > 1)
+    if _do_anneal:
+        print(f"  Entropy annealing: {entropy_start:.4f} → {entropy_end:.4f} "
+              f"over {config.max_episode} episodes")
+
     seqs_list = list(sequences.values())
     env       = Environment(seqs_list)
     agent     = ACER(env.action_number, env.row, env.max_len)
@@ -874,6 +902,12 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     best_score, patience_counter = -float("inf"), 0
     ep = 0
     for ep in p:
+        # ── Entropy annealing ─────────────────────────────────────────────────
+        if _do_anneal:
+            frac = ep / max(1, config.max_episode - 1)
+            config.acer_entropy_coef = entropy_start * (
+                (entropy_end / entropy_start) ** frac)
+
         state = env.reset()
         while True:
             action = agent.select(state)
@@ -892,26 +926,64 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             if stop:
                 break
 
+    # Restore entropy to final annealed value (or original) for reporting
+    if _do_anneal:
+        config.acer_entropy_coef = entropy_end
+
     episodes_run = ep + 1
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
     print(f"Training Complete (ACER) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
-    # Greedy inference
+    # ── Inference: best-of-N stochastic rollouts ──────────────────────────────
+    # With inference_rollouts=1 (default) this is equivalent to the old single
+    # greedy rollout via agent.predict().  With N≥2 we sample N full episodes
+    # from the trained stochastic policy and keep the highest-scoring alignment.
     predict_start_time = time.monotonic()
-    state = env.reset()
-    while True:
-        action = agent.predict(state)
-        _, next_state, done = env.step(action)
-        state = next_state
-        if 0 == done:
-            break
+    n_rollouts = max(1, inference_rollouts)
+    best_inf_score  = -float("inf")
+    best_inf_aligned = None
+
+    for _ in range(n_rollouts):
+        state = env.reset()
+        if n_rollouts == 1:
+            # Deterministic greedy rollout (original behaviour)
+            while True:
+                action = agent.predict(state)
+                _, next_state, done = env.step(action)
+                state = next_state
+                if done == 0:
+                    break
+        else:
+            # Stochastic rollout — samples from π_θ
+            while True:
+                action = agent.select(state)
+                _, next_state, done = env.step(action)
+                agent.record_transition(0.0, float(done))  # dummy reward
+                state = next_state
+                if done == 0:
+                    break
+
+        env.padding()
+        rollout_score = env.calc_score()
+        if rollout_score > best_inf_score:
+            best_inf_score  = rollout_score
+            best_inf_aligned = [list(seq) for seq in env.aligned]
+
+    # Restore the best alignment into env for _print_results / calc_score
+    if best_inf_aligned is not None:
+        env.aligned = best_inf_aligned
+
     predict_end_time = time.monotonic()
-    print("Prediction Complete (ACER)")
+    if n_rollouts > 1:
+        print(f"Prediction Complete (ACER) — best of {n_rollouts} rollouts, "
+              f"SP = {best_inf_score}")
+    else:
+        print("Prediction Complete (ACER)")
     print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
 
-    env.padding()
+    # env.aligned holds the best rollout; padding was applied inside the loop
     sp_score = env.calc_score()
     _print_results(env, scoring)
     print("********************************\n")
