@@ -1,56 +1,41 @@
 #!/bin/bash
 # _ensure_mafft.sh — sourced by run_acer_*.sh scripts
 #
-# Tries to make mafft available. Always exits 0 — mafft is optional;
-# if it cannot be installed, main.py will skip the MAFFT comparison.
-#
-# On success, either:
-#   • mafft is already in PATH, or
-#   • $MAFFT_BIN is exported pointing to the downloaded binary
+# Downloads the official MAFFT static Linux binary to /tmp and exports
+# MAFFT_BIN so main.py uses it directly (bypassing any broken system install).
+# Always exits 0 — mafft is optional; training continues without it.
 
 _ensure_mafft() {
-    # Already available
-    if command -v mafft &>/dev/null; then
-        echo "[INFO] mafft: $(mafft --version 2>&1 | head -1)"
-        return 0
-    fi
-
     local MAFFT_VER="7.526"
     local MAFFT_URL="https://mafft.cbrc.jp/alignment/software/mafft-${MAFFT_VER}-linux.tgz"
     local MAFFT_DIR="/tmp/mafft_static"
 
-    # Re-use a previous download
-    local CACHED
-    CACHED=$(find "$MAFFT_DIR" -name "mafft" -not -path "*/libexec/*" 2>/dev/null | head -1)
-    if [ -n "$CACHED" ]; then
-        export MAFFT_BIN="$CACHED"
-        unset MAFFT_BINARIES
-        echo "[INFO] mafft (cached): $("$MAFFT_BIN" --version 2>&1 | head -1)"
-        return 0
-    fi
+    # Re-use a previous successful download
+    local BIN
+    BIN=$(find "$MAFFT_DIR" -name "mafft" -not -path "*/libexec/*" 2>/dev/null | head -1)
 
-    echo "[INFO] mafft not found — downloading static binary v${MAFFT_VER} ..."
-    mkdir -p "$MAFFT_DIR"
-
-    # Download and extract; suppress set -e by wrapping in if/else
-    if curl -fsSL --max-time 60 "$MAFFT_URL" \
-            | tar -xz -C "$MAFFT_DIR" --strip-components=1 2>/dev/null; then
-        local BIN
-        BIN=$(find "$MAFFT_DIR" -name "mafft" -not -path "*/libexec/*" 2>/dev/null | head -1)
-        if [ -n "$BIN" ]; then
-            chmod +x "$BIN"
-            export MAFFT_BIN="$BIN"
-            # Unset any stale MAFFT_BINARIES from the host environment;
-            # mafft's shell script auto-detects libexec relative to itself
-            # only when MAFFT_BINARIES is unset.
-            unset MAFFT_BINARIES
-            echo "[INFO] mafft ready: $("$MAFFT_BIN" --version 2>&1 | head -1)"
-            return 0
+    if [ -z "$BIN" ]; then
+        echo "[INFO] Downloading mafft v${MAFFT_VER} to /tmp ..."
+        mkdir -p "$MAFFT_DIR"
+        # --strip-components=1 removes the top-level mafft-linux64/ folder
+        if curl -fsSL --max-time 60 "$MAFFT_URL" \
+                | tar -xz -C "$MAFFT_DIR" --strip-components=1 2>/dev/null; then
+            BIN=$(find "$MAFFT_DIR" -name "mafft" -not -path "*/libexec/*" 2>/dev/null | head -1)
         fi
     fi
 
-    echo "[WARN] mafft could not be installed — MAFFT scores will be skipped"
-    return 0   # non-fatal: script continues without MAFFT
+    if [ -z "$BIN" ]; then
+        echo "[WARN] mafft download failed — MAFFT scores will be skipped"
+        return 0
+    fi
+
+    chmod +x "$BIN"
+    # Export the full path so main.py calls this binary directly,
+    # bypassing any broken system mafft in PATH.
+    export MAFFT_BIN="$BIN"
+    # Unset stale MAFFT_BINARIES so the script auto-detects its own libexec.
+    unset MAFFT_BINARIES
+    echo "[INFO] mafft ready: $("$MAFFT_BIN" --version 2>&1 | head -1)"
 }
 
 _ensure_mafft
