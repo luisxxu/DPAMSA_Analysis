@@ -123,6 +123,30 @@ def main():
                              help="Skip benchmark comparison even when benchmark "
                                   "data exists for the dataset.")
 
+    # ── Early stopping / convergence ──────────────────────────────────────────
+    conv_group = parser.add_argument_group(
+        "Early stopping",
+        "Stop training early when the SP score converges or reaches a target, "
+        "instead of always running the full --episodes count.")
+    conv_group.add_argument("--eval-interval", type=int, default=100, metavar="N",
+                            help="Run a greedy evaluation pass every N episodes to "
+                                 "track the current SP score (default: 100; 0 = off)")
+    conv_group.add_argument("--patience", type=int, default=0, metavar="N",
+                            help="Stop after N consecutive evaluations with no SP "
+                                 "improvement.  0 = never stop early (default). "
+                                 "Example: --patience 5 --eval-interval 100 stops "
+                                 "after 500 stagnant episodes.")
+    conv_group.add_argument("--min-delta", type=float, default=0.0, metavar="D",
+                            help="Minimum SP score gain to count as an improvement "
+                                 "and reset patience (default: 0 = any gain counts)")
+    conv_group.add_argument("--target-rank", type=int, default=None, metavar="R",
+                            help="Stop as soon as ACER achieves rank R or better "
+                                 "against the benchmark tools.  Requires --results-csv "
+                                 "so the tool can look up classical scores.  "
+                                 "E.g. --target-rank 1 stops the moment ACER beats "
+                                 "every classical tool; --target-rank 2 stops when "
+                                 "only one classical tool still beats ACER.")
+
     args = parser.parse_args()
 
     # This line ensures that a GPU node is being used if available
@@ -151,6 +175,10 @@ def main():
         results_csv=args.results_csv,
         figures_dir=args.figures_dir,
         no_compare=args.no_compare,
+        eval_interval=args.eval_interval,
+        patience=args.patience,
+        min_delta=args.min_delta,
+        target_rank=args.target_rank,
     )
 
     if args.num_datasets is not None:
@@ -366,6 +394,83 @@ def _maybe_checkpoint(agent, name, interval, episode):
         print(f"  [checkpoint] weights/{name}_ep{episode + 1}.pth")
 
 
+def _bench_classical_scores(fasta_path: str) -> list[float]:
+    """Return a sorted (best→worst) list of available classical SP scores.
+
+    Used by _check_early_stop to evaluate target-rank conditions without
+    re-reading the CSV on every evaluation interval.  Returns [] if the
+    benchmark file cannot be found or parsed.
+    """
+    try:
+        record = bc.lookup(fasta_path, agent_score=0)
+        scores = [v for k, v in record.items()
+                  if k.startswith("SP_") and k != "SP_ACER" and v is not None]
+        return sorted(scores, reverse=True)   # best (highest) first
+    except Exception:
+        return []
+
+
+def _check_early_stop(agent, seqs_list: list, ep: int,
+                      best_score: float, patience_counter: int,
+                      patience: int, min_delta: float,
+                      classical_scores: list, target_rank,
+                      save: str | None, pbar=None) -> tuple:
+    """Run one greedy inference pass and test all early-stopping conditions.
+
+    Returns
+    -------
+    eval_score      : int   — SP score of the greedy policy at this checkpoint
+    best_score      : float — updated best score seen so far
+    patience_counter: int   — updated patience counter
+    stop            : bool  — True if training should stop now
+    """
+    # Fresh environment so training state is not disturbed
+    eval_env = Environment(seqs_list)
+    state    = eval_env.reset()
+    while True:
+        action = agent.predict(state)
+        _, ns, done = eval_env.step(action)
+        state = ns
+        if done == 0:
+            break
+    eval_env.padding()
+    eval_score = eval_env.calc_score()
+
+    improved = eval_score > best_score + min_delta
+    new_best = eval_score if improved else best_score
+    new_pat  = 0 if improved else patience_counter + 1
+
+    # Always keep a "best so far" checkpoint so a crash never loses the peak
+    if improved and save:
+        agent.save(f"{save}_best", path=_weight_dir())
+
+    # Update tqdm postfix
+    if pbar is not None:
+        postfix = {"SP": eval_score, "best": int(new_best)}
+        if patience > 0:
+            postfix["pat"] = f"{new_pat}/{patience}"
+        pbar.set_postfix(postfix)
+
+    # ── Patience check ────────────────────────────────────────────────────────
+    if patience > 0 and new_pat >= patience:
+        print(f"\n  [early stop] No improvement for {new_pat} eval intervals "
+              f"(ep {ep + 1}).  Best SP = {int(new_best)}.")
+        return eval_score, new_best, new_pat, True
+
+    # ── Target-rank check ─────────────────────────────────────────────────────
+    if target_rank is not None and classical_scores:
+        # rank = number of classical tools with a better score + 1
+        rank = sum(1 for s in classical_scores if s > eval_score) + 1
+        if rank <= target_rank:
+            beaten = [s for s in classical_scores if eval_score >= s]
+            print(f"\n  [early stop] ACER rank {rank} ≤ target {target_rank} "
+                  f"at ep {ep + 1}  (SP = {eval_score}, "
+                  f"beats {len(beaten)}/{len(classical_scores)} classical tools).")
+            return eval_score, new_best, new_pat, True
+
+    return eval_score, new_best, new_pat, False
+
+
 def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
                                results_csv, figures_dir, no_compare):
     """Look up benchmark data, print comparison, update CSV and figures.
@@ -398,7 +503,8 @@ def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
 # ---------------------------------------------------------------------------
 
 def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
-          fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
+          fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
+          eval_interval=100, patience=0, min_delta=0.0, target_rank=None):
     output_parameters()
 
 # Commented out the lines below as they relate to the unspecified data format.
@@ -411,11 +517,14 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     print(f"Training on {len(sequences)} sequences:")
     for key in sequences:
         print(f"Sequence {key}")
-    env = Environment(list(sequences.values()))
-    agent = DQN(env.action_number, env.row, env.max_len, env.max_len * env.max_reward)
+    seqs_list = list(sequences.values())
+    env       = Environment(seqs_list)
+    agent     = DQN(env.action_number, env.row, env.max_len, env.max_len * env.max_reward)
     _maybe_load(agent, load)
+    classical = _bench_classical_scores(fasta_path) if fasta_path else []
     p = tqdm(range(config.max_episode))
 
+    best_score, patience_counter = -float("inf"), 0
     for ep in p:
         state = env.reset()
         while True:
@@ -428,6 +537,14 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             state = next_state
         agent.update_epsilon()
         _maybe_checkpoint(agent, save, checkpoint, ep)
+
+        if eval_interval > 0 and (ep + 1) % eval_interval == 0:
+            _, best_score, patience_counter, stop = _check_early_stop(
+                agent, seqs_list, ep, best_score, patience_counter,
+                patience, min_delta, classical, target_rank, save, p)
+            if stop:
+                break
+
     # The end time for training is recorded for run time calculation
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
@@ -472,7 +589,8 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
 # ---------------------------------------------------------------------------
 
 def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
-              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
+              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
+              eval_interval=100, patience=0, min_delta=0.0, target_rank=None):
     """Train an Advantage Actor-Critic agent on the provided sequences.
 
     Loop structure:
@@ -488,24 +606,32 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     for key in sequences:
         print(f"Sequence {key}")
 
-    env   = Environment(list(sequences.values()))
-    agent = ActorCritic(env.action_number, env.row, env.max_len)
+    seqs_list = list(sequences.values())
+    env       = Environment(seqs_list)
+    agent     = ActorCritic(env.action_number, env.row, env.max_len)
     _maybe_load(agent, load)
-    p     = tqdm(range(config.max_episode))
+    classical = _bench_classical_scores(fasta_path) if fasta_path else []
+    p         = tqdm(range(config.max_episode))
 
+    best_score, patience_counter = -float("inf"), 0
     for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
             reward, next_state, done = env.step(action)
-            # Record the reward and done signal for the step just taken
             agent.record_transition(reward, float(done))
             if done == 0:
                 break
             state = next_state
-        # Update policy on the completed episode trajectory
         agent.update()
         _maybe_checkpoint(agent, save, checkpoint, ep)
+
+        if eval_interval > 0 and (ep + 1) % eval_interval == 0:
+            _, best_score, patience_counter, stop = _check_early_stop(
+                agent, seqs_list, ep, best_score, patience_counter,
+                patience, min_delta, classical, target_rank, save, p)
+            if stop:
+                break
 
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
@@ -541,7 +667,8 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
 # ---------------------------------------------------------------------------
 
 def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
-              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
+              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
+              eval_interval=100, patience=0, min_delta=0.0, target_rank=None):
     """Train a PPO-Clip agent on the provided sequences.
 
     Loop structure:
@@ -558,24 +685,32 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     for key in sequences:
         print(f"Sequence {key}")
 
-    env   = Environment(list(sequences.values()))
-    agent = PPO(env.action_number, env.row, env.max_len)
+    seqs_list = list(sequences.values())
+    env       = Environment(seqs_list)
+    agent     = PPO(env.action_number, env.row, env.max_len)
     _maybe_load(agent, load)
-    p     = tqdm(range(config.max_episode))
+    classical = _bench_classical_scores(fasta_path) if fasta_path else []
+    p         = tqdm(range(config.max_episode))
 
+    best_score, patience_counter = -float("inf"), 0
     for ep in p:
         state = env.reset()
         while True:
             action = agent.select(state)
             reward, next_state, done = env.step(action)
-            # Record the reward and done signal for the step just taken
             agent.record_transition(reward, float(done))
             if done == 0:
                 break
             state = next_state
-        # Run ppo_epochs gradient steps on the collected episode rollout
         agent.update()
         _maybe_checkpoint(agent, save, checkpoint, ep)
+
+        if eval_interval > 0 and (ep + 1) % eval_interval == 0:
+            _, best_score, patience_counter, stop = _check_early_stop(
+                agent, seqs_list, ep, best_score, patience_counter,
+                patience, min_delta, classical, target_rank, save, p)
+            if stop:
+                break
 
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
@@ -629,7 +764,8 @@ def output_parameters_acer():
 
 
 def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
-               fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
+               fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
+               eval_interval=100, patience=0, min_delta=0.0, target_rank=None):
     """Train an ACER agent on the provided sequences.
 
     Loop structure:
@@ -660,11 +796,14 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     for key in sequences:
         print(f"Sequence {key}")
 
-    env   = Environment(list(sequences.values()))
-    agent = ACER(env.action_number, env.row, env.max_len)
+    seqs_list = list(sequences.values())
+    env       = Environment(seqs_list)
+    agent     = ACER(env.action_number, env.row, env.max_len)
     _maybe_load(agent, load)
-    p     = tqdm(range(config.max_episode))
+    classical = _bench_classical_scores(fasta_path) if fasta_path else []
+    p         = tqdm(range(config.max_episode))
 
+    best_score, patience_counter = -float("inf"), 0
     for ep in p:
         state = env.reset()
         while True:
@@ -676,6 +815,13 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             state = next_state
         agent.update()
         _maybe_checkpoint(agent, save, checkpoint, ep)
+
+        if eval_interval > 0 and (ep + 1) % eval_interval == 0:
+            _, best_score, patience_counter, stop = _check_early_stop(
+                agent, seqs_list, ep, best_score, patience_counter,
+                patience, min_delta, classical, target_rank, save, p)
+            if stop:
+                break
 
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
