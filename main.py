@@ -10,6 +10,7 @@ from actor_critic import ActorCritic
 from ppo import PPO
 from acer import ACER
 from parallel_env import ParallelEnvironment
+import benchmark_compare as bc
 # The Biopython module is used to load in fasta file datasets
 from Bio import SeqIO
 import torch
@@ -104,6 +105,24 @@ def main():
                                  f"(default → config.acer_trust_region_delta="
                                  f"{config.acer_trust_region_delta})")
 
+    # ── Benchmark comparison ───────────────────────────────────────────────────
+    bench_group = parser.add_argument_group(
+        "Benchmark comparison",
+        "Compare the trained agent against pre-computed classical tool scores.")
+    bench_group.add_argument("--results-csv", type=str, default=None,
+                             metavar="PATH",
+                             help="Append SP scores + benchmark data to this CSV "
+                                  "(created if absent). Used to accumulate results "
+                                  "across multiple runs for figure generation.")
+    bench_group.add_argument("--figures-dir", type=str, default=None,
+                             metavar="DIR",
+                             help="Directory for benchmark comparison figures. "
+                                  "Figures are regenerated from --results-csv after "
+                                  "each run so they stay current during a batch loop.")
+    bench_group.add_argument("--no-compare", action="store_true",
+                             help="Skip benchmark comparison even when benchmark "
+                                  "data exists for the dataset.")
+
     args = parser.parse_args()
 
     # This line ensures that a GPU node is being used if available
@@ -126,7 +145,13 @@ def main():
 
     # This if-then statement ensures that the correct training function is used.
     # For this project, the multi_train function is not used.
-    ckpt_args = dict(save=args.save, load=args.load, checkpoint=args.checkpoint)
+    ckpt_args = dict(
+        save=args.save, load=args.load, checkpoint=args.checkpoint,
+        fasta_path=args.fasta_file,
+        results_csv=args.results_csv,
+        figures_dir=args.figures_dir,
+        no_compare=args.no_compare,
+    )
 
     if args.num_datasets is not None:
         multi_train(sequences, args.num_datasets)
@@ -341,11 +366,39 @@ def _maybe_checkpoint(agent, name, interval, episode):
         print(f"  [checkpoint] weights/{name}_ep{episode + 1}.pth")
 
 
+def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
+                               results_csv, figures_dir, no_compare):
+    """Look up benchmark data, print comparison, update CSV and figures.
+
+    Silently skips if:
+      • no_compare is True
+      • the FASTA path does not match a known dataset (e.g. a custom file)
+      • no benchmark CSV exists for the dataset
+    """
+    if no_compare:
+        return
+    try:
+        record = bc.lookup(fasta_path, sp_score,
+                           episodes=episodes, time_s=time_s)
+        bc.print_comparison(record)
+        if results_csv:
+            bc.append_results(record, results_csv)
+            print(f"  [results] appended → {results_csv}")
+            if figures_dir:
+                paths = bc.generate_figures(results_csv, figures_dir)
+                for p in paths:
+                    print(f"  [figure]  saved → {p}")
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        # Benchmark data unavailable for this file — skip silently
+        print(f"  [benchmark] skipped: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # DQN training
 # ---------------------------------------------------------------------------
 
-def train(sequences, scoring="sp", save=None, load=None, checkpoint=0):
+def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
+          fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
     output_parameters()
 
 # Commented out the lines below as they relate to the unspecified data format.
@@ -405,15 +458,21 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     print(f"Predict time: {predict_time:.2f} seconds")
 
     env.padding()
+    sp_score = env.calc_score()
     _print_results(env, scoring)
     print("********************************\n")
+    if fasta_path:
+        _run_benchmark_comparison(fasta_path, sp_score,
+                                  config.max_episode, train_time,
+                                  results_csv, figures_dir, no_compare)
 
 
 # ---------------------------------------------------------------------------
 # A2C training
 # ---------------------------------------------------------------------------
 
-def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0):
+def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
+              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
     """Train an Advantage Actor-Critic agent on the provided sequences.
 
     Loop structure:
@@ -467,15 +526,22 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
 
     env.padding()
+    sp_score = env.calc_score()
     _print_results(env, scoring)
     print("********************************\n")
+    if fasta_path:
+        _run_benchmark_comparison(fasta_path, sp_score,
+                                  config.max_episode,
+                                  train_end_time - train_start_time,
+                                  results_csv, figures_dir, no_compare)
 
 
 # ---------------------------------------------------------------------------
 # PPO training
 # ---------------------------------------------------------------------------
 
-def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0):
+def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
+              fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
     """Train a PPO-Clip agent on the provided sequences.
 
     Loop structure:
@@ -530,8 +596,14 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
 
     env.padding()
+    sp_score = env.calc_score()
     _print_results(env, scoring)
     print("********************************\n")
+    if fasta_path:
+        _run_benchmark_comparison(fasta_path, sp_score,
+                                  config.max_episode,
+                                  train_end_time - train_start_time,
+                                  results_csv, figures_dir, no_compare)
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +628,8 @@ def output_parameters_acer():
     print("Device: {}".format(config.device_name))
 
 
-def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0):
+def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
+               fasta_path=None, results_csv=None, figures_dir=None, no_compare=False):
     """Train an ACER agent on the provided sequences.
 
     Loop structure:
@@ -623,8 +696,14 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0):
     print(f"Predict time: {predict_end_time - predict_start_time:.2f} seconds")
 
     env.padding()
+    sp_score = env.calc_score()
     _print_results(env, scoring)
     print("********************************\n")
+    if fasta_path:
+        _run_benchmark_comparison(fasta_path, sp_score,
+                                  config.max_episode,
+                                  train_end_time - train_start_time,
+                                  results_csv, figures_dir, no_compare)
 
 
 # ---------------------------------------------------------------------------
