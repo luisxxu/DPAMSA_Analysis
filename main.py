@@ -432,7 +432,8 @@ def _check_early_stop(agent, seqs_list: list, ep: int,
                       best_score: float, patience_counter: int,
                       patience: int, min_delta: float,
                       classical_scores: list, target_rank,
-                      save: str | None, pbar=None) -> tuple:
+                      save: str | None, pbar=None,
+                      n_history: int = 0) -> tuple:
     """Run one greedy inference pass and test all early-stopping conditions.
 
     Returns
@@ -442,8 +443,10 @@ def _check_early_stop(agent, seqs_list: list, ep: int,
     patience_counter: int   — updated patience counter
     stop            : bool  — True if training should stop now
     """
-    # Fresh environment so training state is not disturbed
-    eval_env = Environment(seqs_list)
+    # Fresh environment so training state is not disturbed.
+    # n_history must match the value used when the agent was constructed so
+    # the state vector dimensions are compatible with the network weights.
+    eval_env = Environment(seqs_list, n_history=n_history)
     state    = eval_env.reset()
     while True:
         action = agent.predict(state)
@@ -926,7 +929,8 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
         if eval_interval > 0 and (ep + 1) % eval_interval == 0:
             _, best_score, patience_counter, stop = _check_early_stop(
                 agent, seqs_list, ep, best_score, patience_counter,
-                patience, min_delta, classical, target_rank, save, p)
+                patience, min_delta, classical, target_rank, save, p,
+                n_history=env.n_history)
             if stop:
                 break
 
