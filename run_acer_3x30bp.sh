@@ -24,7 +24,7 @@ mkdir -p results figures weights
 PYTHON="$(which python)"
 
 # ── MAFFT: install static binary to /tmp if not already in PATH ───────────────
-source "$SCRIPT_DIR/_ensure_mafft.sh"
+source "$SCRIPT_DIR/_ensure_mafft.sh" || true
 
 echo "========================================================"
 echo " ACER · dataset1_3x30bp · tests ${START}–${END}"
