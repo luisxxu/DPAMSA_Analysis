@@ -24,6 +24,7 @@ _ensure_mafft() {
     CACHED=$(find "$MAFFT_DIR" -name "mafft" -not -path "*/libexec/*" 2>/dev/null | head -1)
     if [ -n "$CACHED" ]; then
         export MAFFT_BIN="$CACHED"
+        unset MAFFT_BINARIES
         echo "[INFO] mafft (cached): $("$MAFFT_BIN" --version 2>&1 | head -1)"
         return 0
     fi
@@ -39,6 +40,10 @@ _ensure_mafft() {
         if [ -n "$BIN" ]; then
             chmod +x "$BIN"
             export MAFFT_BIN="$BIN"
+            # Unset any stale MAFFT_BINARIES from the host environment;
+            # mafft's shell script auto-detects libexec relative to itself
+            # only when MAFFT_BINARIES is unset.
+            unset MAFFT_BINARIES
             echo "[INFO] mafft ready: $("$MAFFT_BIN" --version 2>&1 | head -1)"
             return 0
         fi

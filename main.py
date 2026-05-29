@@ -486,10 +486,17 @@ def _run_mafft(fasta_path: str, seqs_list: list) -> "int | None":
     # Allow the run scripts to point at a downloaded binary via MAFFT_BIN
     mafft_cmd = os.environ.get("MAFFT_BIN", "mafft")
 
+    # Strip MAFFT_BINARIES from the child environment: mafft's own shell script
+    # auto-detects its libexec path relative to itself, but only when
+    # MAFFT_BINARIES is unset.  A stale host value causes a version-mismatch
+    # error even when the binary itself is correct.
+    child_env = {k: v for k, v in os.environ.items() if k != "MAFFT_BINARIES"}
+
     try:
         proc = subprocess.run(
             [mafft_cmd, "--auto", "--quiet", fasta_path],
             capture_output=True, text=True, timeout=300,
+            env=child_env,
         )
     except FileNotFoundError:
         print(f"  [MAFFT] not found ({mafft_cmd}) — skipping MAFFT comparison")
