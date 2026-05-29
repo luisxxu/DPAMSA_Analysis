@@ -529,7 +529,16 @@ def _run_mafft(fasta_path: str, seqs_list: list,
     _FAIL = (None, None) if return_alignment else None
 
     mafft_cmd = os.environ.get("MAFFT_BIN", "mafft")
-    child_env  = {k: v for k, v in os.environ.items() if k != "MAFFT_BINARIES"}
+
+    # Build child env: strip any stale MAFFT_BINARIES, then re-point it at the
+    # libexec/ directory that lives *next to our downloaded binary*.
+    # Simply unsetting is not enough — DataHub's conda activation scripts
+    # re-inject MAFFT_BINARIES inside child processes, overriding the unset.
+    child_env = {k: v for k, v in os.environ.items() if k != "MAFFT_BINARIES"}
+    if os.path.isabs(mafft_cmd):
+        _libexec = os.path.join(os.path.dirname(mafft_cmd), "libexec")
+        if os.path.isdir(_libexec):
+            child_env["MAFFT_BINARIES"] = _libexec
 
     try:
         proc = subprocess.run(

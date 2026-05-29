@@ -51,9 +51,20 @@ _ensure_mafft() {
     fi
 
     chmod +x "$MAFFT_BIN_PATH"
-    unset MAFFT_BINARIES   # prevent stale host variable from poisoning the check
+
+    # Explicitly set MAFFT_BINARIES to OUR libexec so the mafft shell script
+    # never falls back to a system/conda installation.  Unsetting is not enough:
+    # DataHub's conda activation scripts re-inject MAFFT_BINARIES inside child
+    # processes even when the interactive shell shows it as empty.
+    local MAFFT_LIBEXEC
+    MAFFT_LIBEXEC="$(dirname "$MAFFT_BIN_PATH")/libexec"
+    export MAFFT_BINARIES="$MAFFT_LIBEXEC"
     export MAFFT_BIN="$MAFFT_BIN_PATH"
-    echo "[INFO] MAFFT ready: $("$MAFFT_BIN" --version 2>&1 | head -1)"
+
+    # Run version check with MAFFT_BINARIES pinned so the output is reliable
+    local VER
+    VER=$(env MAFFT_BINARIES="$MAFFT_LIBEXEC" "$MAFFT_BIN" --version 2>&1 | head -1)
+    echo "[INFO] MAFFT ready: ${VER}"
 }
 
 _ensure_mafft
