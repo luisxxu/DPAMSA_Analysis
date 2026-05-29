@@ -52,8 +52,15 @@ echo ""
 if command -v mafft &>/dev/null; then
     echo "  [OK]  mafft $(mafft --version 2>&1 | head -1)"
 else
-    echo "  [--]  mafft not found — MAFFT scores will be skipped"
-    echo "        Install with (only ~3 MB):  conda install -c bioconda mafft --no-deps"
+    echo "  [--]  mafft not found — installing via conda (cache → /tmp, ~3 MB) ..."
+    # Use /tmp as the package cache so we don't hit the home-dir quota
+    CONDA_PKGS_DIRS=/tmp/conda_pkgs conda install -c bioconda mafft -y --quiet 2>&1 \
+        | grep -E "^(Preparing|Downloading|Extracting|done|mafft)" || true
+    if command -v mafft &>/dev/null; then
+        echo "  [OK]  mafft $(mafft --version 2>&1 | head -1)"
+    else
+        echo "  [WARN] mafft install failed — MAFFT scores will be skipped at runtime"
+    fi
 fi
 
 echo ""

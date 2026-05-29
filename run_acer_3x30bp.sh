@@ -23,6 +23,18 @@ mkdir -p results figures weights
 
 PYTHON="$(which python)"
 
+# ── Ensure MAFFT is available ─────────────────────────────────────────────────
+if ! command -v mafft &>/dev/null; then
+    echo "[INFO] mafft not found — installing via conda (cache → /tmp) ..."
+    CONDA_PKGS_DIRS=/tmp/conda_pkgs conda install -c bioconda mafft -y --quiet 2>&1 \
+        | grep -E "^(Preparing|Downloading|Extracting|done|mafft)" || true
+    command -v mafft &>/dev/null \
+        && echo "[INFO] mafft installed: $(mafft --version 2>&1 | head -1)" \
+        || echo "[WARN] mafft install failed — MAFFT scores will be skipped"
+else
+    echo "[INFO] mafft ready: $(mafft --version 2>&1 | head -1)"
+fi
+
 echo "========================================================"
 echo " ACER · dataset1_3x30bp · tests ${START}–${END}"
 echo " episodes=${EPISODES}  patience=${PATIENCE}"
