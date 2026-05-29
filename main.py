@@ -70,6 +70,40 @@ def main():
                             "'sp' (default): Sum-of-Pairs O(L·k²); "
                             "'profile': PSSM-based O(L·k) equivalent; "
                             "'both': print both scores and display the PSSM table."))
+
+    # ── ACER hyperparameter overrides ─────────────────────────────────────────
+    # These let you tune ACER from the command line without editing config.py.
+    # Useful when scaling to harder datasets (more sequences / longer sequences)
+    # where the default 3×30 bp settings are too aggressive or too conservative.
+    acer_group = parser.add_argument_group(
+        "ACER hyperparameters",
+        "Override config.py defaults for ACER (ignored for DQN / A2C / PPO).")
+    acer_group.add_argument("--acer-lr", type=float, default=None,
+                            metavar="LR",
+                            help="Adam learning rate (default: %(default)s → "
+                                 f"config.acer_lr={config.acer_lr})")
+    acer_group.add_argument("--acer-entropy", type=float, default=None,
+                            metavar="COEF",
+                            help="Entropy bonus coefficient.  Raise this for "
+                                 "larger action spaces to prevent premature "
+                                 "policy collapse  (default → "
+                                 f"config.acer_entropy_coef={config.acer_entropy_coef})")
+    acer_group.add_argument("--acer-replay-ratio", type=int, default=None,
+                            metavar="N",
+                            help="Off-policy updates per on-policy step.  "
+                                 "Reduce for larger action spaces where stale "
+                                 "buffer episodes cause instability "
+                                 f"(default → config.acer_replay_ratio={config.acer_replay_ratio})")
+    acer_group.add_argument("--acer-cbar", type=float, default=None,
+                            metavar="C",
+                            help="IS truncation threshold c̄ "
+                                 f"(default → config.acer_c_bar={config.acer_c_bar})")
+    acer_group.add_argument("--acer-trust-delta", type=float, default=None,
+                            metavar="D",
+                            help="KL penalty coefficient for trust-region "
+                                 f"(default → config.acer_trust_region_delta="
+                                 f"{config.acer_trust_region_delta})")
+
     args = parser.parse_args()
 
     # This line ensures that a GPU node is being used if available
@@ -78,6 +112,13 @@ def main():
 
     if args.episodes is not None:
         config.max_episode = args.episodes
+
+    # Apply ACER overrides
+    if args.acer_lr            is not None: config.acer_lr                 = args.acer_lr
+    if args.acer_entropy       is not None: config.acer_entropy_coef       = args.acer_entropy
+    if args.acer_replay_ratio  is not None: config.acer_replay_ratio       = args.acer_replay_ratio
+    if args.acer_cbar          is not None: config.acer_c_bar              = args.acer_cbar
+    if args.acer_trust_delta   is not None: config.acer_trust_region_delta = args.acer_trust_delta
 
     # Load sequences from the fasta file using the BioPython tools
     sequences = {record.id: str(record.seq)
