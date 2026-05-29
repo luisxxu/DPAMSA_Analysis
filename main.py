@@ -581,6 +581,7 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     p = tqdm(range(config.max_episode))
 
     best_score, patience_counter = -float("inf"), 0
+    ep = 0
     for ep in p:
         state = env.reset()
         while True:
@@ -601,11 +602,12 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             if stop:
                 break
 
+    episodes_run = ep + 1
     # The end time for training is recorded for run time calculation
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
     # Print statement for checkpoint confirmation
-    print("Training Complete")
+    print(f"Training Complete — {episodes_run} episodes")
     # Run time calculation
     train_time = train_end_time - train_start_time
     # Print training time formatted to 2 decimal places
@@ -637,7 +639,7 @@ def train(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     if fasta_path:
         mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
-                                  config.max_episode, train_time,
+                                  episodes_run, train_time,
                                   results_csv, figures_dir, no_compare,
                                   mafft_score=mafft_score)
 
@@ -672,6 +674,7 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     p         = tqdm(range(config.max_episode))
 
     best_score, patience_counter = -float("inf"), 0
+    ep = 0
     for ep in p:
         state = env.reset()
         while True:
@@ -691,9 +694,10 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             if stop:
                 break
 
+    episodes_run = ep + 1
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
-    print("Training Complete (A2C)")
+    print(f"Training Complete (A2C) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
     # Greedy inference
@@ -716,7 +720,7 @@ def train_a2c(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     if fasta_path:
         mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
-                                  config.max_episode,
+                                  episodes_run,
                                   train_end_time - train_start_time,
                                   results_csv, figures_dir, no_compare,
                                   mafft_score=mafft_score)
@@ -753,6 +757,7 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     p         = tqdm(range(config.max_episode))
 
     best_score, patience_counter = -float("inf"), 0
+    ep = 0
     for ep in p:
         state = env.reset()
         while True:
@@ -772,9 +777,10 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             if stop:
                 break
 
+    episodes_run = ep + 1
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
-    print("Training Complete (PPO)")
+    print(f"Training Complete (PPO) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
     # Greedy inference
@@ -797,7 +803,7 @@ def train_ppo(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     if fasta_path:
         mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
-                                  config.max_episode,
+                                  episodes_run,
                                   train_end_time - train_start_time,
                                   results_csv, figures_dir, no_compare,
                                   mafft_score=mafft_score)
@@ -866,6 +872,7 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     p         = tqdm(range(config.max_episode))
 
     best_score, patience_counter = -float("inf"), 0
+    ep = 0
     for ep in p:
         state = env.reset()
         while True:
@@ -885,9 +892,10 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
             if stop:
                 break
 
+    episodes_run = ep + 1
     train_end_time = time.monotonic()
     _maybe_save(agent, save)
-    print("Training Complete (ACER)")
+    print(f"Training Complete (ACER) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
     # Greedy inference
@@ -910,7 +918,7 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     if fasta_path:
         mafft_score = _run_mafft(fasta_path, seqs_list)
         _run_benchmark_comparison(fasta_path, sp_score,
-                                  config.max_episode,
+                                  episodes_run,
                                   train_end_time - train_start_time,
                                   results_csv, figures_dir, no_compare,
                                   mafft_score=mafft_score)
