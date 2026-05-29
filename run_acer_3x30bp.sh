@@ -12,7 +12,7 @@ EVAL_INTERVAL=100
 PATIENCE=5
 RESULTS_CSV="results/acer_3x30bp_benchmark.csv"
 FIGURES_DIR="figures/benchmark_3x30bp"
-LOG_FILE="/tmp/acer_3x30bp.log"    # /tmp avoids home-dir quota
+LOG_FILE="/tmp/acer_3x30bp.log"
 
 START=${1:-0}
 END=${2:-49}
@@ -23,17 +23,8 @@ mkdir -p results figures weights
 
 PYTHON="$(which python)"
 
-# ── Ensure MAFFT is available ─────────────────────────────────────────────────
-if ! command -v mafft &>/dev/null; then
-    echo "[INFO] mafft not found — installing via conda (cache → /tmp) ..."
-    CONDA_PKGS_DIRS=/tmp/conda_pkgs conda install -c bioconda mafft -y --quiet 2>&1 \
-        | grep -E "^(Preparing|Downloading|Extracting|done|mafft)" || true
-    command -v mafft &>/dev/null \
-        && echo "[INFO] mafft installed: $(mafft --version 2>&1 | head -1)" \
-        || echo "[WARN] mafft install failed — MAFFT scores will be skipped"
-else
-    echo "[INFO] mafft ready: $(mafft --version 2>&1 | head -1)"
-fi
+# ── MAFFT: install static binary to /tmp if not already in PATH ───────────────
+source "$SCRIPT_DIR/_ensure_mafft.sh"
 
 echo "========================================================"
 echo " ACER · dataset1_3x30bp · tests ${START}–${END}"
