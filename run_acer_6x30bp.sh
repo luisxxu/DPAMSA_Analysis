@@ -8,7 +8,9 @@ DATASET_DIR="datasets/fasta_files/dataset1_6x30bp"
 EPISODES=5000
 EVAL_INTERVAL=100
 PATIENCE=5
-ACER_ENTROPY=1.0
+ACER_ENTROPY=1.0        # entropy annealing start value
+ACER_ENTROPY_END=0.01   # entropy annealing end value
+ACER_INF_ROLLOUTS=10    # best-of-N stochastic rollouts at inference
 RESULTS_CSV="results/acer_6x30bp_benchmark.csv"
 FIGURES_DIR="figures/benchmark_6x30bp"
 LOG_FILE="/tmp/acer_6x30bp.log"
@@ -45,6 +47,8 @@ for i in $(seq "$START" "$END"); do
         --episodes "$EPISODES" \
         --save "acer_6x30bp_test${i}" \
         --acer-entropy "$ACER_ENTROPY" \
+        --acer-entropy-end "$ACER_ENTROPY_END" \
+        --acer-inference-rollouts "$ACER_INF_ROLLOUTS" \
         --results-csv "$RESULTS_CSV" \
         --figures-dir "$FIGURES_DIR" \
         --eval-interval "$EVAL_INTERVAL" \
