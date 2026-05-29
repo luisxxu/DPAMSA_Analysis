@@ -52,16 +52,26 @@ _ensure_mafft() {
 
     chmod +x "$MAFFT_BIN_PATH"
 
-    # Explicitly set MAFFT_BINARIES to OUR libexec so the mafft shell script
-    # never falls back to a system/conda installation.  Unsetting is not enough:
-    # DataHub's conda activation scripts re-inject MAFFT_BINARIES inside child
-    # processes even when the interactive shell shows it as empty.
     local MAFFT_LIBEXEC
     MAFFT_LIBEXEC="$(dirname "$MAFFT_BIN_PATH")/libexec"
+
+    # ── Sync libexec/VERSION with the version embedded in the wrapper script ──
+    # The portable tarball sometimes ships with a stale, missing, or v0.000
+    # VERSION file, causing the mafft wrapper's internal check to fail.
+    # We extract the version string from the script itself and write it to
+    # libexec/VERSION so the two values always agree.
+    local MAFFT_VER
+    MAFFT_VER=$(grep '^version=' "$MAFFT_BIN_PATH" 2>/dev/null | head -1 | \
+                sed 's/version="\([^"]*\)".*/\1/')
+    if [ -n "$MAFFT_VER" ] && [ -d "$MAFFT_LIBEXEC" ]; then
+        echo "$MAFFT_VER" > "$MAFFT_LIBEXEC/VERSION"
+    fi
+
+    # Pin MAFFT_BINARIES to OUR libexec (unsetting alone is not enough —
+    # conda activation scripts can re-inject it inside child processes)
     export MAFFT_BINARIES="$MAFFT_LIBEXEC"
     export MAFFT_BIN="$MAFFT_BIN_PATH"
 
-    # Run version check with MAFFT_BINARIES pinned so the output is reliable
     local VER
     VER=$(env MAFFT_BINARIES="$MAFFT_LIBEXEC" "$MAFFT_BIN" --version 2>&1 | head -1)
     echo "[INFO] MAFFT ready: ${VER}"
