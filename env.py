@@ -40,7 +40,7 @@ nucleotides = ['A', 'T', 'C', 'G', '-']
 class Environment:
     def __init__(self, data,
                  nucleotide_size=50, text_size=25,
-                 show_nucleotide_name=True):
+                 show_nucleotide_name=True, n_history=0):
         self.data = [[nucleotides_map[data[i][j]] for j in range(len(data[i]))] for i in range(len(data))]
         self.row = len(data)
         self.max_len = max([len(data[i]) for i in range(len(data))])
@@ -48,6 +48,11 @@ class Environment:
         self.nucleotide_size = nucleotide_size
         self.max_window_width = 1800
         self.text_size = text_size
+
+        # Number of most-recently-aligned columns to include in the state.
+        # Gives the agent memory of what it has just done so it can make
+        # context-aware gap-insertion decisions.
+        self.n_history = n_history
 
         self.action_number = 2 ** self.row - 1
 
@@ -73,12 +78,33 @@ class Environment:
         return res
 
     def __get_current_state(self):
+        """Build the flat state vector fed to the network.
+
+        Layout per sequence i (total slots = max_len + 1 + n_history):
+          [history_col_1, history_col_2, ..., history_col_n,   ← n_history tokens
+           remaining_0, remaining_1, ..., remaining_k, sentinel, 0, 0, ...]
+
+        History tokens are the last n_history tokens placed into aligned[i]
+        (most-recent first), or 0 (pad) if fewer than n_history columns have
+        been aligned so far.  This lets the agent observe what it just aligned
+        and make context-aware gap-insertion decisions.
+        """
         state = []
         for i in range(self.row):
-            state.extend((self.not_aligned[i][j] if j < len(self.not_aligned[i]) else 5)
-                         for j in range(len(self.not_aligned[i]) + 1))
-
-        state.extend([0 for _ in range(self.row * (self.max_len + 1) - len(state))])
+            # ── Alignment history (most-recent first, pad with 0) ─────────────
+            for k in range(self.n_history):
+                if len(self.aligned[i]) > k:
+                    state.append(self.aligned[i][-(k + 1)])
+                else:
+                    state.append(0)  # no column aligned yet at this depth
+            # ── Remaining unaligned tokens with a gap sentinel ────────────────
+            state.extend(
+                (self.not_aligned[i][j] if j < len(self.not_aligned[i]) else 5)
+                for j in range(len(self.not_aligned[i]) + 1)
+            )
+        # Pad the whole vector to a fixed size
+        target = self.row * (self.max_len + 1 + self.n_history)
+        state.extend([0] * (target - len(state)))
         return state
 
     def __calc_reward(self):
