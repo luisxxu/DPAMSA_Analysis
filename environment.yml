@@ -1,0 +1,29 @@
+name: dpamsa
+channels:
+  - pytorch
+  - nvidia
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  # ── Deep learning ────────────────────────────────────────────────────────────
+  # pytorch-cuda picks the GPU-enabled wheel; conda-forge resolves CUDA libs.
+  # Change 11.8 → 12.1 if your DataHub node reports CUDA 12.x (check: nvidia-smi)
+  - pytorch::pytorch
+  - pytorch::pytorch-cuda=11.8
+  - nvidia::cuda-toolkit=11.8
+  # ── Scientific stack ─────────────────────────────────────────────────────────
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  # ── Bioinformatics ───────────────────────────────────────────────────────────
+  - biopython
+  - bioconda::mafft
+  # ── Utilities ────────────────────────────────────────────────────────────────
+  - tqdm
+  - pip
+  - pip:
+      # nothing that can't be conda-installed, but kept as a fallback section
+      []
