@@ -223,15 +223,33 @@ def print_comparison(record: dict) -> None:
 
 
 def append_results(record: dict, csv_path: str) -> None:
-    """Append *record* to the cumulative results CSV (create if absent)."""
+    """Upsert *record* into the cumulative results CSV.
+
+    If a row with the same (dataset, test_id) already exists it is
+    **replaced** with the new record, so re-running a test always
+    reflects the most recent result and duplicate rows never accumulate.
+    The CSV is created (with a header) if it does not yet exist.
+    """
     os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
-    file_exists = os.path.isfile(csv_path)
-    with open(csv_path, "a", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=_CSV_COLS,
-                                extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(record)
+
+    # Load existing data (empty DataFrame if file absent)
+    if os.path.isfile(csv_path):
+        df = pd.read_csv(csv_path)
+        # Back-fill columns added in later versions
+        for col in _CSV_COLS:
+            if col not in df.columns:
+                df[col] = float("nan")
+    else:
+        df = pd.DataFrame(columns=_CSV_COLS)
+
+    # Drop any existing rows for this (dataset, test_id) pair
+    mask = (df["dataset"] == record["dataset"]) & (df["test_id"] == record["test_id"])
+    df = df[~mask]
+
+    # Append the new record and write back
+    new_row = pd.DataFrame([{col: record.get(col) for col in _CSV_COLS}])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(csv_path, index=False)
 
 
 def generate_figures(csv_path: str, figures_dir: str) -> list[str]:
