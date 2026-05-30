@@ -15,7 +15,7 @@ env/
 *.ckpt
 
 # Results (generated at runtime)
-../result/
+result/
 
 # macOS
 .DS_Store

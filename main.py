@@ -1076,6 +1076,16 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     print(f"Training Complete (ACER) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
 
+    # ── Restore best checkpoint before inference ──────────────────────────────
+    # _check_early_stop saves {save}_best whenever a new peak SP is found.
+    # Load it now so inference runs on the best weights, not the final weights.
+    if save:
+        best_ckpt = f"{save}_best"
+        best_ckpt_path = os.path.join(_weight_dir(), best_ckpt + ".pth")
+        if os.path.exists(best_ckpt_path):
+            agent.load(best_ckpt, path=_weight_dir())
+            print(f"[INFO] Loaded best checkpoint '{best_ckpt}' for inference.")
+
     # ── Inference: best-of-N stochastic rollouts ──────────────────────────────
     # With inference_rollouts=1 (default) this is equivalent to the old single
     # greedy rollout via agent.predict().  With N≥2 we sample N full episodes

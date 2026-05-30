@@ -3,13 +3,11 @@
 #
 # Downloads the MAFFT static Linux binary to /tmp and exports MAFFT_BIN.
 # Always exits 0 -- mafft is optional; training continues without it.
-#
-# The system mafft on some DataHub pods has a broken libexec/VERSION file,
-# so we always use our own downloaded copy rather than whatever is in PATH.
 
 _ensure_mafft() {
     local MAFFT_DIR="/tmp/mafft_static"
     local MAFFT_BIN_PATH=""
+    local downloaded_url=""
 
     # Re-use a previous successful download
     MAFFT_BIN_PATH=$(find "$MAFFT_DIR" -name "mafft" \
@@ -30,6 +28,7 @@ _ensure_mafft() {
             if curl -fsSL --max-time 120 --retry 3 "$url" \
                     | tar -xz -C "$MAFFT_DIR" --strip-components=1 2>/dev/null; then
                 downloaded=1
+                downloaded_url="$url"
                 break
             fi
         done
@@ -53,27 +52,49 @@ _ensure_mafft() {
     local MAFFT_LIBEXEC
     MAFFT_LIBEXEC="$(dirname "$MAFFT_BIN_PATH")/libexec"
 
-    # Fix libexec/VERSION
-    # The portable tarball ships with a stale v0.000 VERSION file, causing the
-    # wrapper script's internal version check to always fail.
-    # Strategy: find the version string hard-coded in the wrapper script itself
-    # using a permissive grep (handles leading whitespace) and write it to the
-    # VERSION file so both values always agree.
-    local MAFFT_VER
-    MAFFT_VER=$(grep -m 1 'version="v' "$MAFFT_BIN_PATH" 2>/dev/null | \
-                sed 's/.*version="\([^"]*\)".*/\1/')
+    # Fix the libexec/VERSION file.
+    # The portable tarball ships with a stale or missing VERSION (shows v0.000),
+    # causing the wrapper script's internal version check to always fail.
+    # We try three strategies in order:
+    #
+    #  1. Bootstrap: run the binary, capture the mismatch error
+    #     "v0.000 != v7.526 (2024/Apr/26)", extract the right-hand side.
+    #  2. URL-based hardcode: derive version from the download URL.
+    #  3. grep the wrapper script for the version string.
+    local MAFFT_VER=""
+
+    # Strategy 1: bootstrap from the version-mismatch error message
+    if [ -z "$MAFFT_VER" ] && [ -d "$MAFFT_LIBEXEC" ]; then
+        local bootstrap_out
+        bootstrap_out=$(env MAFFT_BINARIES="$MAFFT_LIBEXEC" \
+                            "$MAFFT_BIN_PATH" --version 2>&1 || true)
+        MAFFT_VER=$(echo "$bootstrap_out" | grep ' != ' | \
+                    sed 's/.* != //' | tr -d '\r' | head -1)
+    fi
+
+    # Strategy 2: hardcoded strings keyed to the download URL
+    if [ -z "$MAFFT_VER" ]; then
+        case "$downloaded_url" in
+            *7.526*) MAFFT_VER="v7.526 (2024/Apr/26)" ;;
+            *7.505*) MAFFT_VER="v7.505 (2022/Sep/16)" ;;
+        esac
+    fi
+
+    # Strategy 3: grep the wrapper script
+    if [ -z "$MAFFT_VER" ]; then
+        MAFFT_VER=$(grep -m 1 'version=' "$MAFFT_BIN_PATH" 2>/dev/null | \
+                    grep -oE 'v[0-9]+\.[0-9]+[^"]*' | head -1)
+    fi
+
+    # Write VERSION and pin MAFFT_BINARIES
     if [ -n "$MAFFT_VER" ] && [ -d "$MAFFT_LIBEXEC" ]; then
         echo "$MAFFT_VER" > "$MAFFT_LIBEXEC/VERSION"
-        echo "[INFO]   patched libexec/VERSION -> ${MAFFT_VER}"
+        echo "[INFO]   wrote libexec/VERSION -> ${MAFFT_VER}"
     else
-        echo "[WARN]   could not extract version from script"
+        echo "[WARN]   all version-detection strategies failed"
         echo "[WARN]   current VERSION: $(cat "$MAFFT_LIBEXEC/VERSION" 2>/dev/null || echo '<missing>')"
     fi
 
-    # Pin MAFFT_BINARIES to OUR libexec.
-    # Unsetting alone is not enough: DataHub conda activation scripts can
-    # re-inject MAFFT_BINARIES inside child processes even when the
-    # interactive shell reports it as empty.
     export MAFFT_BINARIES="$MAFFT_LIBEXEC"
     export MAFFT_BIN="$MAFFT_BIN_PATH"
 
