@@ -119,6 +119,20 @@ def main():
                                  "SP score is used.  N=1 = single greedy rollout "
                                  "(default).  N≥2 provides a free improvement at "
                                  "the cost of ~N× longer inference.")
+    acer_group.add_argument("--pretrain", action="store_true",
+                            help="Before RL training, pretrain the ACER actor "
+                                 "via behavioural cloning on the MAFFT alignment "
+                                 "of the input FASTA.  Gives the network a warm "
+                                 "start near classical-tool quality so RL refines "
+                                 "from a good policy rather than random init.  "
+                                 "Requires MAFFT to be available (MAFFT_BIN or "
+                                 "system PATH).")
+    acer_group.add_argument("--pretrain-epochs", type=int, default=100,
+                            metavar="N",
+                            help="Number of behavioural-cloning epochs when "
+                                 "--pretrain is set (default: 100).  Each epoch "
+                                 "is one gradient step over the full expert "
+                                 "trajectory (~alignment_length steps).")
 
     # ── Benchmark comparison ───────────────────────────────────────────────────
     bench_group = parser.add_argument_group(
@@ -197,6 +211,8 @@ def main():
         target_rank=args.target_rank,
         entropy_end=args.acer_entropy_end,
         inference_rollouts=args.acer_inference_rollouts,
+        pretrain=args.pretrain,
+        pretrain_epochs=args.pretrain_epochs,
     )
 
     if args.num_datasets is not None:
@@ -492,43 +508,56 @@ def _check_early_stop(agent, seqs_list: list, ep: int,
     return eval_score, new_best, new_pat, False
 
 
-def _run_mafft(fasta_path: str, seqs_list: list) -> "int | None":
-    """Run MAFFT on *fasta_path* and return its SP score using the same scoring
-    system as the RL environment.
+def _run_mafft(fasta_path: str, seqs_list: list,
+               return_alignment: bool = False):
+    """Run MAFFT on *fasta_path* and return its SP score.
 
-    The aligned output from MAFFT is fed into a fresh Environment via
-    set_alignment(), so the score is directly comparable to the RL agent's score.
+    The aligned output is scored with the same gap/match/mismatch penalties
+    used during RL training so the result is directly comparable.
 
-    Returns None if MAFFT is not installed, times out, or fails.
+    Args:
+        return_alignment: when True, return (score, aligned_seqs) instead of
+            just score.  Used by the imitation-learning pretrain path.
+
+    Returns:
+        score (int | None) normally, or (score, aligned_seqs) when
+        return_alignment=True.  Both values are None on failure.
     """
     import subprocess
     import io as _io
 
-    # Allow the run scripts to point at a downloaded binary via MAFFT_BIN
+    _FAIL = (None, None) if return_alignment else None
+
     mafft_cmd = os.environ.get("MAFFT_BIN", "mafft")
 
-    # Strip MAFFT_BINARIES from the child environment: mafft's own shell script
-    # auto-detects its libexec path relative to itself, but only when
-    # MAFFT_BINARIES is unset.  A stale host value causes a version-mismatch
-    # error even when the binary itself is correct.
+    # Build child env: strip any stale MAFFT_BINARIES, then re-point it at the
+    # libexec/ directory that lives *next to our downloaded binary*.
+    # Simply unsetting is not enough — DataHub's conda activation scripts
+    # re-inject MAFFT_BINARIES inside child processes, overriding the unset.
     child_env = {k: v for k, v in os.environ.items() if k != "MAFFT_BINARIES"}
+    if os.path.isabs(mafft_cmd):
+        _libexec = os.path.join(os.path.dirname(mafft_cmd), "libexec")
+        if os.path.isdir(_libexec):
+            child_env["MAFFT_BINARIES"] = _libexec
 
     try:
         proc = subprocess.run(
-            [mafft_cmd, "--auto", "--quiet", fasta_path],
+            # --inputorder: output sequences in the same order as the input
+            # FASTA so the action-bitmask decoding stays in sync with seqs_list.
+            [mafft_cmd, "--auto", "--quiet", "--inputorder", fasta_path],
             capture_output=True, text=True, timeout=300,
             env=child_env,
         )
     except FileNotFoundError:
         print(f"  [MAFFT] not found ({mafft_cmd}) — skipping MAFFT comparison")
-        return None
+        return _FAIL
     except subprocess.TimeoutExpired:
         print("  [MAFFT] timed out after 300 s")
-        return None
+        return _FAIL
 
     if proc.returncode != 0:
         print(f"  [MAFFT] error (exit {proc.returncode}): {proc.stderr[:200]}")
-        return None
+        return _FAIL
 
     from Bio import SeqIO as _SeqIO
     aligned_seqs = [str(r.seq) for r in _SeqIO.parse(_io.StringIO(proc.stdout), "fasta")]
@@ -536,14 +565,106 @@ def _run_mafft(fasta_path: str, seqs_list: list) -> "int | None":
     if len(aligned_seqs) != len(seqs_list):
         print(f"  [MAFFT] sequence count mismatch "
               f"({len(aligned_seqs)} output vs {len(seqs_list)} input)")
-        return None
+        return _FAIL
 
-    # Score with the identical gap/match/mismatch penalties used during RL training
     eval_env = Environment(seqs_list)
     eval_env.set_alignment(aligned_seqs)
     score = eval_env.calc_score()
     print(f"  [MAFFT] SP score = {score}")
+
+    if return_alignment:
+        return score, aligned_seqs
     return score
+
+
+def _decode_alignment_to_actions(env, aligned_seqs: list) -> list:
+    """Convert a reference MSA into expert (state, action) pairs for BC.
+
+    Each column of the alignment maps to one environment action:
+        bit i = 1  →  gap inserted into sequence i
+        bit i = 0  →  sequence i advances (emits its next character)
+
+    The environment is reset at the start and stepped column-by-column.
+    Collection stops when done=0 (all sequences exhausted) or the alignment
+    is fully consumed.  All-gap columns (action = 2^row − 1) are skipped
+    because they are not part of the valid action space.
+
+    Returns:
+        list of (state, action) tuples for behavioural cloning.
+    """
+    n_seqs  = len(aligned_seqs)
+    aln_len = len(aligned_seqs[0])
+    state   = env.reset()
+    expert  = []
+
+    for col in range(aln_len):
+        action = 0
+        for i in range(n_seqs):
+            if aligned_seqs[i][col] == '-':
+                action |= (1 << i)
+
+        # Skip all-gap columns (undefined in the action space)
+        if action == (1 << n_seqs) - 1:
+            continue
+
+        expert.append((state, action))
+        _, next_state, done = env.step(action)
+        state = next_state
+        if done == 0:
+            break
+
+    return expert
+
+
+def _pretrain_acer(agent, expert_data: list, n_epochs: int) -> None:
+    """Pretrain the ACER actor via behavioural cloning on expert (state, action) pairs.
+
+    Minimises cross-entropy between the policy distribution and the expert
+    action at each step.  Only the actor head (and shared encoder) are
+    updated; the Q-head is left for the subsequent RL phase.  The EMA
+    average-policy network is synced to the pretrained weights so the trust
+    region starts centred on the imitation policy.
+
+    Args:
+        agent:       ACER instance (must already be on the correct device).
+        expert_data: list of (state, action) tuples from _decode_alignment_to_actions.
+        n_epochs:    number of full passes over expert_data.
+    """
+    import torch.nn.functional as _F
+
+    if not expert_data:
+        print("  [Pretrain] No expert data available — skipping")
+        return
+
+    print(f"  [Pretrain] Behavioural cloning: "
+          f"{len(expert_data)} expert steps × {n_epochs} epochs ...")
+
+    states  = torch.LongTensor([s for s, _ in expert_data]).to(config.device)
+    actions = torch.LongTensor([a for _, a in expert_data]).to(config.device)
+
+    report_every = max(1, n_epochs // 5)
+    agent.net.train()
+
+    for epoch in range(n_epochs):
+        with torch.amp.autocast("cuda", enabled=agent._use_amp):
+            logits, _, _ = agent.net(states)
+            loss = _F.cross_entropy(logits, actions)
+
+        agent.optimizer.zero_grad()
+        agent.scaler.scale(loss).backward()
+        agent.scaler.unscale_(agent.optimizer)
+        torch.nn.utils.clip_grad_norm_(agent.net.parameters(), max_norm=10.0)
+        agent.scaler.step(agent.optimizer)
+        agent.scaler.update()
+
+        if (epoch + 1) % report_every == 0:
+            print(f"  [Pretrain] epoch {epoch + 1:4d}/{n_epochs}  "
+                  f"BC-loss={loss.item():.4f}")
+
+    # Sync EMA average network so the trust region starts at the pretrained policy
+    with torch.no_grad():
+        agent.avg_net.load_state_dict(agent.net.state_dict())
+    print("  [Pretrain] Complete — avg_net synced to pretrained weights")
 
 
 def _run_benchmark_comparison(fasta_path, sp_score, episodes, time_s,
@@ -855,7 +976,8 @@ def output_parameters_acer():
 def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
                fasta_path=None, results_csv=None, figures_dir=None, no_compare=False,
                eval_interval=100, patience=0, min_delta=0.0, target_rank=None,
-               entropy_end=None, inference_rollouts=1):
+               entropy_end=None, inference_rollouts=1,
+               pretrain=False, pretrain_epochs=100):
     """Train an ACER agent on the provided sequences.
 
     Loop structure:
@@ -896,13 +1018,24 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
               f"over {config.max_episode} episodes")
 
     seqs_list = list(sequences.values())
-    # n_history=1: include the last aligned column in the state so the agent
-    # can make context-aware decisions (e.g. avoid back-to-back gap columns).
-    env       = Environment(seqs_list, n_history=1)
-    # max_seq_len passed to the network must account for the extra history slot
-    # so that dim = seq_num × (max_len + n_history + 1) matches state length.
-    agent     = ACER(env.action_number, env.row, env.max_len + env.n_history)
+    env       = Environment(seqs_list)
+    agent     = ACER(env.action_number, env.row, env.max_len)
     _maybe_load(agent, load)
+
+    # ── Imitation-learning pretraining (optional) ─────────────────────────────
+    if pretrain:
+        if not fasta_path:
+            print("  [Pretrain] --pretrain requires --fasta-path; skipping")
+        else:
+            print(f"  [Pretrain] Running MAFFT to obtain expert alignment ...")
+            pt_score, pt_aligned = _run_mafft(fasta_path, seqs_list,
+                                              return_alignment=True)
+            if pt_aligned is None:
+                print("  [Pretrain] MAFFT unavailable — skipping pretraining")
+            else:
+                expert_data = _decode_alignment_to_actions(env, pt_aligned)
+                _pretrain_acer(agent, expert_data, pretrain_epochs)
+
     classical = _bench_classical_scores(fasta_path) if fasta_path else []
     p         = tqdm(range(config.max_episode))
 
@@ -929,8 +1062,7 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
         if eval_interval > 0 and (ep + 1) % eval_interval == 0:
             _, best_score, patience_counter, stop = _check_early_stop(
                 agent, seqs_list, ep, best_score, patience_counter,
-                patience, min_delta, classical, target_rank, save, p,
-                n_history=env.n_history)
+                patience, min_delta, classical, target_rank, save, p)
             if stop:
                 break
 
@@ -943,6 +1075,16 @@ def train_acer(sequences, scoring="sp", save=None, load=None, checkpoint=0,
     _maybe_save(agent, save)
     print(f"Training Complete (ACER) — {episodes_run} episodes")
     print(f"Training time: {train_end_time - train_start_time:.2f} seconds")
+
+    # ── Restore best checkpoint before inference ──────────────────────────────
+    # _check_early_stop saves {save}_best whenever a new peak SP is found.
+    # Load it now so inference runs on the best weights, not the final weights.
+    if save:
+        best_ckpt = f"{save}_best"
+        best_ckpt_path = os.path.join(_weight_dir(), best_ckpt + ".pth")
+        if os.path.exists(best_ckpt_path):
+            agent.load(best_ckpt, path=_weight_dir())
+            print(f"[INFO] Loaded best checkpoint '{best_ckpt}' for inference.")
 
     # ── Inference: best-of-N stochastic rollouts ──────────────────────────────
     # With inference_rollouts=1 (default) this is equivalent to the old single
