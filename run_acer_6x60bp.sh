@@ -1,16 +1,19 @@
 #!/bin/bash
 # run_acer_6x60bp.sh — train ACER on dataset1_6x60bp (50 tests)
 # Usage: bash run_acer_6x60bp.sh [start] [end]
+#   bash run_acer_6x60bp.sh        # runs tests 0-49
+#   bash run_acer_6x60bp.sh 20     # resumes from test 20
+#   bash run_acer_6x60bp.sh 20 35  # runs tests 20-35
 
-set -euo pipefail
+set -uo pipefail
 
 DATASET_DIR="datasets/fasta_files/dataset1_6x60bp"
-EPISODES=5000
+EPISODES=8000
 EVAL_INTERVAL=100
-PATIENCE=25
-ACER_ENTROPY=1.0        # entropy annealing start value
-ACER_ENTROPY_END=0.01   # entropy annealing end value
-ACER_INF_ROLLOUTS=10    # best-of-N stochastic rollouts at inference
+PATIENCE=0
+ACER_ENTROPY=1.0
+ACER_ENTROPY_END=0.01
+ACER_INF_ROLLOUTS=10
 RESULTS_CSV="results/acer_6x60bp_benchmark.csv"
 FIGURES_DIR="figures/benchmark_6x60bp"
 LOG_FILE="/tmp/acer_6x60bp.log"
@@ -24,7 +27,6 @@ mkdir -p results figures weights
 
 PYTHON="$(which python)"
 
-# ── MAFFT: install static binary to /tmp if not already in PATH ───────────────
 source "$SCRIPT_DIR/_ensure_mafft.sh" || true
 
 echo "========================================================"
@@ -33,15 +35,17 @@ echo " episodes=${EPISODES}  entropy=${ACER_ENTROPY}  patience=${PATIENCE}"
 echo " log → ${LOG_FILE}"
 echo "========================================================"
 
+FAILED=()
+
 for i in $(seq "$START" "$END"); do
     FASTA="${DATASET_DIR}/test${i}.fasta"
     if [ ! -f "$FASTA" ]; then
-        echo "[SKIP] ${FASTA} not found"
+        echo "[SKIP] ${FASTA} not found" | tee -a "$LOG_FILE"
         continue
     fi
-    echo ""
-    echo "--- test${i} ---"
-    "$PYTHON" main.py "$FASTA" \
+    echo "" | tee -a "$LOG_FILE"
+    echo "--- test${i} ---" | tee -a "$LOG_FILE"
+    if "$PYTHON" main.py "$FASTA" \
         --algorithm acer \
         --scoring sp \
         --episodes "$EPISODES" \
@@ -52,12 +56,21 @@ for i in $(seq "$START" "$END"); do
         --results-csv "$RESULTS_CSV" \
         --figures-dir "$FIGURES_DIR" \
         --eval-interval "$EVAL_INTERVAL" \
-        --patience "$PATIENCE"
-done 2>&1 | tee -a "$LOG_FILE"
+        --patience "$PATIENCE" 2>&1 | tee -a "$LOG_FILE"; then
+        echo "[OK] test${i} done" | tee -a "$LOG_FILE"
+    else
+        echo "[FAIL] test${i} exited with error -- continuing" | tee -a "$LOG_FILE"
+        FAILED+=("$i")
+    fi
+done
 
 echo ""
 echo "========================================================"
 echo " Done.  Results → ${RESULTS_CSV}"
 echo "         Figures → ${FIGURES_DIR}/"
 echo "         Log     → ${LOG_FILE}"
+if [ ${#FAILED[@]} -gt 0 ]; then
+    echo " Failed tests: ${FAILED[*]}"
+    echo " Resume with: bash run_acer_6x60bp.sh <first_failed_test>"
+fi
 echo "========================================================"

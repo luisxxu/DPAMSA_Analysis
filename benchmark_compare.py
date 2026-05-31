@@ -2,7 +2,7 @@
 benchmark_compare.py
 ====================
 Utilities for comparing an ACER (or any RL agent) SP score against the
-pre-computed classical-tool benchmark stored in result/benchmark/*.csv.
+pre-computed classical-tool benchmark stored in datasets/benchmark/*.csv.
 
 Public API
 ----------
@@ -24,7 +24,7 @@ The FASTA file path must contain one of the recognised dataset directory
 names (dataset1_3x30bp, dataset1_6x30bp, dataset1_6x60bp) so the correct
 benchmark CSV can be located automatically.
 
-Benchmark CSV format (result/benchmark/)
+Benchmark CSV format (datasets/benchmark/)
 -----------------------------------------
   3x30bp :  File name = "test0"         (no extension), ClustalW = empty
   6x30bp :  File name = "test0.fasta"   (with extension)
@@ -108,7 +108,7 @@ def _load_benchmark_row(dataset_key: str, test_stem: str) -> dict[str, float | N
       "test0.fasta"  (6x30bp, 6x60bp — with suffix)
     """
     csv_name = _BENCHMARK_CSVS[dataset_key]
-    csv_path = os.path.join(_PROJECT_ROOT, "result", "benchmark", csv_name)
+    csv_path = os.path.join(_PROJECT_ROOT, "datasets", "benchmark", csv_name)
 
     df = pd.read_csv(csv_path)
     # Normalise the File name column to stem (strip .fasta if present)
