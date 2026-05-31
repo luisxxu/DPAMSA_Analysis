@@ -5,9 +5,9 @@
 set -euo pipefail
 
 DATASET_DIR="datasets/fasta_files/dataset1_6x60bp"
-EPISODES=8000
+EPISODES=5000
 EVAL_INTERVAL=100
-PATIENCE=0
+PATIENCE=25
 ACER_ENTROPY=1.0        # entropy annealing start value
 ACER_ENTROPY_END=0.01   # entropy annealing end value
 ACER_INF_ROLLOUTS=10    # best-of-N stochastic rollouts at inference
